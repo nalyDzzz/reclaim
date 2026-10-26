@@ -4,6 +4,12 @@ An open-source Windows companion for taking your disk back: uninstall apps and t
 
 > Status: early development. It works, but read what each action will do before confirming it.
 
+## Download
+
+Get the latest installer from [Releases](https://github.com/nalyDzzz/reclaim/releases/latest). Choose the `-setup.exe` if you're unsure; there's also an `.msi` and a portable `.exe` that runs without installing. Reclaim needs 64-bit Windows 10 or 11.
+
+Builds aren't code-signed yet, so SmartScreen may show "Windows protected your PC". Select **More info**, then **Run anyway**.
+
 ## What it does
 
 **Apps.** Lists everything in the Windows uninstall registry (machine-wide 64/32-bit and per-user), with real icons and sizes measured from each app's folder. Uninstalling runs the app's own uninstaller and waits for it, including uninstallers that hand off to a helper process. Then Reclaim scans for leftovers: install folders, AppData, ProgramData, Start menu and desktop shortcuts, registry settings keys, startup entries, and App Paths registrations. Each leftover is rated Certain, Likely, or Possible; only Certain ones are pre-selected.
@@ -25,7 +31,7 @@ An open-source Windows companion for taking your disk back: uninstall apps and t
 
 ## Stack
 
-- [Tauri 2](https://tauri.app) shell, with a ~10 MB installer that uses the WebView2 runtime already on Windows 10/11
+- [Tauri 2](https://tauri.app) shell, with a ~2 MB installer that uses the WebView2 runtime already on Windows 10/11
 - Rust backend: `winreg` for the registry, `windows` crate for Win32 (icons, ShellExecute, Recycle Bin, drives), `rayon` for parallel scans, `trash` for Recycle Bin moves
 - React 19 + TypeScript + Tailwind CSS 4 frontend, `d3-hierarchy` for treemap layout
 - Windows 11 Mica backdrop with a custom title bar
@@ -57,6 +63,15 @@ cd src-tauri; cargo test   # backend tests
 ```
 
 To test machine-wide cleanup and HKLM leftovers, use **Restart as administrator** in the sidebar; it relaunches the dev build elevated.
+
+Every push and pull request runs formatting, Clippy, the type check, and the tests on Windows ([CI workflow](.github/workflows/ci.yml)).
+
+### Releasing
+
+1. Bump the version in `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`, and `package.json`, and commit.
+2. Tag and push: `git tag v0.2.0 && git push origin v0.2.0`
+
+The [release workflow](.github/workflows/release.yml) builds the installers on Windows and publishes them as a GitHub Release with generated notes. It refuses to run if the tag doesn't match the version in `tauri.conf.json`.
 
 ## Roadmap
 

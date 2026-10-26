@@ -1,0 +1,64 @@
+# Builds the Windows installers and publishes them as a GitHub Release.
+# Triggered by pushing a version tag, e.g. `git tag v0.2.0 && git push origin v0.2.0`.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Check the tag matches the app version
+        shell: bash
+        run: |
+          version=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME doesn't match the version in tauri.conf.json ($version)."
+            exit 1
+          fi
+
+      - uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: Reclaim ${{ github.ref_name }}
+          releaseDraft: false
+          prerelease: false
+          generateReleaseNotes: true
+          uploadPlainBinary: true
+          releaseBody: |
+            ## Download
+
+            | File | What it is |
+            | --- | --- |
+            | `Reclaim_…_x64-setup.exe` | Installer. Start here if you're not sure. |
+            | `Reclaim_…_x64_en-US.msi` | MSI installer, for managed or scripted installs. |
+            | `reclaim…exe` (no "setup") | Portable app. Runs without installing. |
+
+            Requires 64-bit Windows 10 or 11.
+
+            Reclaim isn't code-signed yet, so Windows SmartScreen may show "Windows protected your PC". Select **More info**, then **Run anyway**.
