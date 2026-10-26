@@ -36,17 +36,42 @@ fn env_dir(name: &str, fallback: &str) -> PathBuf {
     std::env::var_os(name).map(PathBuf::from).unwrap_or_else(|| PathBuf::from(fallback))
 }
 
+/// A known folder resolved by the shell. The machine-wide ones read HKLM, so
+/// unlike environment variables a standard user can't redirect them.
+fn known_folder(id: &windows::core::GUID) -> Option<PathBuf> {
+    use windows::Win32::System::Com::CoTaskMemFree;
+    use windows::Win32::UI::Shell::{KF_FLAG_DONT_VERIFY, SHGetKnownFolderPath};
+    unsafe {
+        let raw = SHGetKnownFolderPath(id, KF_FLAG_DONT_VERIFY, None).ok()?;
+        let path = raw.to_string().ok().map(PathBuf::from);
+        CoTaskMemFree(Some(raw.0 as *const _));
+        path.filter(|p| p.is_absolute())
+    }
+}
+
+fn system_windows_dir() -> Option<PathBuf> {
+    use windows::Win32::System::SystemInformation::GetSystemWindowsDirectoryW;
+    let mut buf = [0u16; 260];
+    let len = unsafe { GetSystemWindowsDirectoryW(Some(&mut buf)) } as usize;
+    (len > 0 && len < buf.len()).then(|| PathBuf::from(String::from_utf16_lossy(&buf[..len])))
+}
+
+/// Folder locations. Machine-wide folders (Windows, Program Files,
+/// ProgramData, the profile root) come from Windows APIs rather than the
+/// environment, because the protected-path rules depend on them and an
+/// elevated Reclaim must not trust variables a standard user can set.
 pub fn known() -> &'static KnownDirs {
+    use windows::Win32::UI::Shell::{FOLDERID_Profile, FOLDERID_ProgramData, FOLDERID_ProgramFiles, FOLDERID_ProgramFilesX86};
     static DIRS: OnceLock<KnownDirs> = OnceLock::new();
     DIRS.get_or_init(|| {
-        let user_profile = env_dir("USERPROFILE", r"C:\Users\Default");
+        let user_profile = known_folder(&FOLDERID_Profile).unwrap_or_else(|| env_dir("USERPROFILE", r"C:\Users\Default"));
         let app_data = env_dir("APPDATA", &user_profile.join(r"AppData\Roaming").to_string_lossy());
         let local_app_data = env_dir("LOCALAPPDATA", &user_profile.join(r"AppData\Local").to_string_lossy());
-        let program_data = env_dir("ProgramData", r"C:\ProgramData");
+        let program_data = known_folder(&FOLDERID_ProgramData).unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"));
         KnownDirs {
-            windows: env_dir("SystemRoot", r"C:\Windows"),
-            program_files: env_dir("ProgramW6432", &env_dir("ProgramFiles", r"C:\Program Files").to_string_lossy()),
-            program_files_x86: env_dir("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+            windows: system_windows_dir().unwrap_or_else(|| PathBuf::from(r"C:\Windows")),
+            program_files: known_folder(&FOLDERID_ProgramFiles).unwrap_or_else(|| PathBuf::from(r"C:\Program Files")),
+            program_files_x86: known_folder(&FOLDERID_ProgramFilesX86).unwrap_or_else(|| PathBuf::from(r"C:\Program Files (x86)")),
             temp: env_dir("TEMP", &local_app_data.join("Temp").to_string_lossy()),
             local_programs: local_app_data.join("Programs"),
             start_menu_user: app_data.join(r"Microsoft\Windows\Start Menu\Programs"),
@@ -62,6 +87,11 @@ pub fn known() -> &'static KnownDirs {
 /// Expands `%VAR%` references using the process environment. Unknown
 /// variables are left untouched so they fail safely later.
 pub fn expand_env(input: &str) -> String {
+    expand_vars(input, |name| std::env::var(name).ok())
+}
+
+/// Expands `%VAR%` references using `lookup`.
+pub fn expand_vars(input: &str, lookup: impl Fn(&str) -> Option<String>) -> String {
     let mut out = String::with_capacity(input.len());
     let mut rest = input;
     while let Some(start) = rest.find('%') {
@@ -70,8 +100,8 @@ pub fn expand_env(input: &str) -> String {
         match after.find('%') {
             Some(end) => {
                 let name = &after[..end];
-                match std::env::var(name) {
-                    Ok(value) if !name.is_empty() => out.push_str(&value),
+                match lookup(name) {
+                    Some(value) if !name.is_empty() => out.push_str(&value),
                     _ => {
                         out.push('%');
                         out.push_str(name);
@@ -216,10 +246,10 @@ pub fn wildcard_match(pattern: &str, text: &str) -> bool {
     pi == p.len()
 }
 
-/// Expands a path pattern whose components may contain wildcards, e.g.
-/// `C:\Users\me\AppData\Local\Google\Chrome\User Data\*\Cache`.
-pub fn expand_pattern(pattern: &str) -> Vec<PathBuf> {
-    let expanded = expand_env(pattern);
+/// Expands a path whose components may contain wildcards, e.g.
+/// `C:\Users\me\AppData\Local\Google\Chrome\User Data\*\Cache`. Variables
+/// must already be expanded; anything still containing `%` matches nothing.
+pub fn expand_glob(expanded: &str) -> Vec<PathBuf> {
     if expanded.contains('%') {
         return Vec::new();
     }
