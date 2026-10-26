@@ -1,0 +1,6 @@
+# One compiler for local builds, CI, and release builds, so a new Rust
+# release can't change lints or codegen underneath us. Bump deliberately.
+[toolchain]
+channel = "1.93.1"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

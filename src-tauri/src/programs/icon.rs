@@ -149,15 +149,15 @@ unsafe fn read_bitmaps(color: HBITMAP, mask: HBITMAP) -> Option<(u32, u32, Vec<u
             return None;
         }
         // Legacy icons carry no alpha channel; derive it from the AND mask.
-        if pixels.chunks_exact(4).all(|p| p[3] == 0) && !mask.is_invalid() {
+        if pixels.as_chunks::<4>().0.iter().all(|p| p[3] == 0) && !mask.is_invalid() {
             let mut mask_px = vec![0u8; (w * h * 4) as usize];
             let mut bmi_mask = BITMAPINFO { bmiHeader: header, ..Default::default() };
             unsafe { GetDIBits(dc, mask, 0, h as u32, Some(mask_px.as_mut_ptr().cast()), &mut bmi_mask, DIB_RGB_COLORS) };
-            for (px, m) in pixels.chunks_exact_mut(4).zip(mask_px.chunks_exact(4)) {
+            for (px, m) in pixels.as_chunks_mut::<4>().0.iter_mut().zip(mask_px.as_chunks::<4>().0) {
                 px[3] = if m[0] == 0 { 255 } else { 0 };
             }
         }
-        for px in pixels.chunks_exact_mut(4) {
+        for px in pixels.as_chunks_mut::<4>().0 {
             px.swap(0, 2); // BGRA -> RGBA
         }
         Some((w as u32, h as u32, pixels))
