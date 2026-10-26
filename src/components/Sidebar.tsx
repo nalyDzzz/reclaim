@@ -2,7 +2,8 @@ import { HardDrive, Package, ShieldCheck, ShieldHalf, SlidersHorizontal, Sparkle
 import { api, errorMessage } from "../lib/api";
 import { formatBytes } from "../lib/format";
 import { useApp } from "../state/app";
-import { cx, Meter } from "./ui";
+import { useUpdates } from "../state/updates";
+import { cx, Meter, Spinner } from "./ui";
 
 export type Page = "apps" | "storage" | "cleanup" | "debloat";
 
@@ -82,7 +83,30 @@ export function Sidebar({ page, onNavigate }: { page: Page; onNavigate: (p: Page
               </span>
             </button>
           ))}
+
+        {system && <VersionLine version={system.appVersion} />}
       </div>
     </nav>
+  );
+}
+
+/** Current version, with a manual check that turns into the update prompt. */
+function VersionLine({ version }: { version: string }) {
+  const { status, available, checkNow, openDialog } = useUpdates();
+  const checking = status.kind === "checking";
+  return (
+    <div className="flex items-center justify-between gap-2 px-3 text-[11.5px] whitespace-nowrap text-ink-3">
+      <span className="num">v{version}</span>
+      {available ? (
+        <button onClick={openDialog} className="font-medium text-uv-300 hover:underline">
+          Update available
+        </button>
+      ) : (
+        <button onClick={checkNow} disabled={checking} className="flex items-center gap-1.5 hover:text-ink disabled:opacity-70">
+          {checking && <Spinner className="size-3" />}
+          {checking ? "Checking" : "Check for updates"}
+        </button>
+      )}
+    </div>
   );
 }

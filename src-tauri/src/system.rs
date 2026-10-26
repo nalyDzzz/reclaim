@@ -64,6 +64,19 @@ pub struct SystemInfo {
     os_name: String,
     mica: bool,
     app_version: String,
+    install_kind: &'static str,
+}
+
+/// How this copy was installed, which decides whether it can update itself.
+/// The bundler stamps the bundle type into the exe it packs into each
+/// installer; the plain exe (portable and dev builds) stays unstamped.
+fn install_kind() -> &'static str {
+    use tauri::utils::config::BundleType;
+    match tauri::utils::platform::bundle_type() {
+        Some(BundleType::Nsis) => "nsis",
+        Some(BundleType::Msi) => "msi",
+        _ => "portable",
+    }
 }
 
 #[tauri::command]
@@ -75,6 +88,7 @@ pub fn system_info(app: AppHandle) -> SystemInfo {
         os_name: os_name(build),
         mica: supports_mica(),
         app_version: app.package_info().version.to_string(),
+        install_kind: install_kind(),
     }
 }
 

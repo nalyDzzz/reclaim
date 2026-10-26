@@ -7,6 +7,8 @@ export interface SystemInfo {
   osName: string;
   mica: boolean;
   appVersion: string;
+  /** "portable" covers the standalone exe and dev builds, which can't update themselves. */
+  installKind: "nsis" | "msi" | "portable";
 }
 
 export interface Drive {

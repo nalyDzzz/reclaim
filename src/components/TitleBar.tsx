@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { ArrowDownToLine } from "lucide-react";
 import { useApp } from "../state/app";
+import { useUpdates } from "../state/updates";
 import { formatBytes } from "../lib/format";
 import { cx } from "./ui";
 import { Logo } from "./Logo";
@@ -28,6 +30,7 @@ export function TitleBar() {
         </span>
       </div>
       <div data-tauri-drag-region className="h-full flex-1" />
+      <UpdateButton />
       <ReclaimedLedger />
       <div className="ml-3 flex h-full">
         <WindowButton label="Minimize" onClick={() => appWindow.minimize()}>
@@ -75,6 +78,21 @@ function WindowButton({
       <svg viewBox="0 0 11 11" className="size-[11px]" fill="none" stroke="currentColor" strokeWidth="1">
         {children}
       </svg>
+    </button>
+  );
+}
+
+/** Appears only once a newer version has been found. */
+function UpdateButton() {
+  const { available, openDialog } = useUpdates();
+  if (!available) return null;
+  return (
+    <button
+      onClick={openDialog}
+      className="animate-rise mr-2 flex h-7 items-center gap-1.5 rounded-full bg-uv-600 px-3 text-[12px] font-medium text-white shadow-[inset_0_1px_0_rgb(255_255_255/0.14)] transition-colors hover:bg-uv-500"
+    >
+      <ArrowDownToLine className="size-3.5" />
+      Update to {available.version}
     </button>
   );
 }

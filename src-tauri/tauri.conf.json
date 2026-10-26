@@ -32,7 +32,10 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis", "msi"],
+    "targets": [
+      "nsis",
+      "msi"
+    ],
     "shortDescription": "Uninstall apps, find what's filling your drive, and clean up Windows.",
     "category": "Utility",
     "icon": [
@@ -42,5 +45,17 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDhENEI3N0M3MzNBODg2REEKUldUYWhxZ3p4M2RMalZNODdWNzJxNHB0MWFGTDQ1UFh6WVBvQXZQZVlaNmVrOXNyZWRTTDZ0Zk4K",
+      "endpoints": [
+        "https://github.com/nalyDzzz/reclaim/releases/latest/download/latest.json"
+      ],
+      "requireSignedVersion": true,
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }
