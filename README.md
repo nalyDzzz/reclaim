@@ -10,6 +10,8 @@ Get the latest installer from [Releases](https://github.com/nalyDzzz/reclaim/rel
 
 Builds aren't code-signed yet, so SmartScreen may show "Windows protected your PC". Select **More info**, then **Run anyway**.
 
+Installed copies keep themselves up to date from 0.2.0 on: when a new version is out, an **Update** button appears in the title bar and installs it in place. The portable version links to the download instead.
+
 ## What it does
 
 **Apps.** Lists everything in the Windows uninstall registry (machine-wide 64/32-bit and per-user), with real icons and sizes measured from each app's folder. Uninstalling runs the app's own uninstaller and waits for it, including uninstallers that hand off to a helper process. Then Reclaim scans for leftovers: install folders, AppData, ProgramData, Start menu and desktop shortcuts, registry settings keys, startup entries, and App Paths registrations. Each leftover is rated Certain, Likely, or Possible; only Certain ones are pre-selected.
@@ -69,9 +71,15 @@ Every push and pull request runs formatting, Clippy, the type check, and the tes
 ### Releasing
 
 1. Bump the version in `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`, and `package.json`, and commit.
-2. Tag and push: `git tag v0.2.0 && git push origin v0.2.0`
+2. Tag with release notes and push. The tag message body becomes the notes in the app's update dialog and at the top of the GitHub Release:
+   ```powershell
+   git tag -a v0.2.0 -m "Reclaim 0.2.0" -m "- Added the thing" -m "- Fixed the other thing"
+   git push origin v0.2.0
+   ```
 
-The [release workflow](.github/workflows/release.yml) builds the installers on Windows and publishes them, with SHA-256 checksums and generated notes, as a GitHub Release. It refuses to run if the tag doesn't match the version in `tauri.conf.json`. The build runs with a read-only token; only the final publish step can write to the repository, and every action is pinned to a commit.
+The [release workflow](.github/workflows/release.yml) builds the installers, signs them for the in-app updater, and publishes them with `latest.json`, SHA-256 checksums, and generated notes. It refuses to run if the tag doesn't match the version in `tauri.conf.json`. To check the pipeline without publishing, run it by hand from `main` (`gh workflow run release.yml`); that builds and signs but releases nothing.
+
+How it's locked down: the build runs third-party code with a read-only token and no secrets. The updater signing key lives in the `release` environment, which only `v*` tags and `main` can use, and only the signing job reads it. Only the final publish job can write to the repository, and every action is pinned to a commit.
 
 ## Roadmap
 
