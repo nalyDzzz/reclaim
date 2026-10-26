@@ -65,14 +65,14 @@ pub fn known() -> &'static KnownDirs {
     static DIRS: OnceLock<KnownDirs> = OnceLock::new();
     DIRS.get_or_init(|| {
         let user_profile = known_folder(&FOLDERID_Profile).unwrap_or_else(|| env_dir("USERPROFILE", r"C:\Users\Default"));
-        let app_data = env_dir("APPDATA", &user_profile.join(r"AppData\Roaming").to_string_lossy());
-        let local_app_data = env_dir("LOCALAPPDATA", &user_profile.join(r"AppData\Local").to_string_lossy());
+        let app_data = long_path(&env_dir("APPDATA", &user_profile.join(r"AppData\Roaming").to_string_lossy()));
+        let local_app_data = long_path(&env_dir("LOCALAPPDATA", &user_profile.join(r"AppData\Local").to_string_lossy()));
         let program_data = known_folder(&FOLDERID_ProgramData).unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"));
         KnownDirs {
             windows: system_windows_dir().unwrap_or_else(|| PathBuf::from(r"C:\Windows")),
             program_files: known_folder(&FOLDERID_ProgramFiles).unwrap_or_else(|| PathBuf::from(r"C:\Program Files")),
             program_files_x86: known_folder(&FOLDERID_ProgramFilesX86).unwrap_or_else(|| PathBuf::from(r"C:\Program Files (x86)")),
-            temp: env_dir("TEMP", &local_app_data.join("Temp").to_string_lossy()),
+            temp: long_path(&env_dir("TEMP", &local_app_data.join("Temp").to_string_lossy())),
             local_programs: local_app_data.join("Programs"),
             start_menu_user: app_data.join(r"Microsoft\Windows\Start Menu\Programs"),
             start_menu_common: program_data.join(r"Microsoft\Windows\Start Menu\Programs"),
@@ -82,6 +82,38 @@ pub fn known() -> &'static KnownDirs {
             local_app_data,
         }
     })
+}
+
+/// Expands 8.3 short names (`C:\PROGRA~1` -> `C:\Program Files`) so path
+/// comparisons see the real names. Paths that don't exist come back as-is.
+pub fn long_path(path: &Path) -> PathBuf {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use windows::Win32::Storage::FileSystem::GetLongPathNameW;
+    use windows::core::PCWSTR;
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut buf = vec![0u16; 512];
+    loop {
+        let len = unsafe { GetLongPathNameW(PCWSTR(wide.as_ptr()), Some(&mut buf)) } as usize;
+        if len == 0 {
+            return path.to_path_buf();
+        }
+        if len < buf.len() {
+            return PathBuf::from(std::ffi::OsString::from_wide(&buf[..len]));
+        }
+        buf.resize(len + 1, 0); // too small: `len` is the size needed
+    }
+}
+
+/// The 8.3 short form of `path`, if the volume has one that differs.
+#[cfg(test)]
+pub fn short_path(path: &Path) -> Option<PathBuf> {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use windows::Win32::Storage::FileSystem::GetShortPathNameW;
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut buf = [0u16; 512];
+    let len = unsafe { GetShortPathNameW(windows::core::PCWSTR(wide.as_ptr()), Some(&mut buf)) } as usize;
+    let short = (len > 0 && len < buf.len()).then(|| PathBuf::from(std::ffi::OsString::from_wide(&buf[..len])))?;
+    (short != path).then_some(short)
 }
 
 /// Expands `%VAR%` references using the process environment. Unknown
@@ -142,7 +174,8 @@ pub fn is_protected(path: &Path) -> bool {
     if !path.is_absolute() {
         return true;
     }
-    let p = normalize(path);
+    // Without this, C:\PROGRA~1 would slip past the C:\Program Files rule.
+    let p = normalize(&long_path(path));
     // Drive roots and anything too shallow to be specific.
     if p.len() <= 3 || p.matches('\\').count() < 1 || p.ends_with(':') {
         return true;
@@ -353,6 +386,15 @@ mod tests {
         assert!(is_protected(Path::new("relative\\path")));
         assert!(!is_protected(&k.program_files.join("SomeVendor")));
         assert!(!is_protected(&k.local_app_data.join("Discord")));
+    }
+
+    #[test]
+    fn short_names_do_not_bypass_protection() {
+        let k = known();
+        // Only meaningful where the volume still generates 8.3 names.
+        let Some(short) = short_path(&k.program_files) else { return };
+        assert!(is_protected(&short), "{} should be protected", short.display());
+        assert_eq!(normalize(&long_path(&short)), normalize(&k.program_files));
     }
 
     #[test]

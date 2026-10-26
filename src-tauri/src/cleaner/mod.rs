@@ -277,7 +277,8 @@ fn target_roots(t: &Target) -> Vec<PathBuf> {
 
 fn per_user_root_allowed(root: &Path) -> bool {
     let k = paths::known();
-    let p = paths::normalize(root);
+    // %TEMP% is sometimes stored with 8.3 short names (C:\Users\RUNNER~1\...).
+    let p = paths::normalize(&paths::long_path(root));
     let in_profile = p.starts_with(&format!("{}\\", paths::normalize(&k.user_profile)));
     in_profile && (!paths::is_protected(root) || p == paths::normalize(&k.temp))
 }
@@ -484,6 +485,13 @@ mod tests {
         assert!(!per_user_root_allowed(&k.program_files.join("SomeApp")));
         assert!(!per_user_root_allowed(&k.user_profile));
         assert!(!per_user_root_allowed(&k.user_profile.join("Documents")));
+        // The same folders written with 8.3 short names get the same answers.
+        if let Some(short_temp) = paths::short_path(&k.temp) {
+            assert!(per_user_root_allowed(&short_temp), "{}", short_temp.display());
+        }
+        if let Some(short_pf) = paths::short_path(&k.program_files) {
+            assert!(!per_user_root_allowed(&short_pf.join("SomeApp")));
+        }
     }
 
     #[test]
