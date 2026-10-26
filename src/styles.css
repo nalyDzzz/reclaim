@@ -1,0 +1,169 @@
+@import "tailwindcss";
+@import "@fontsource-variable/mona-sans/wdth.css";
+@import "@fontsource-variable/jetbrains-mono/index.css";
+
+/*
+ * Reclaim design tokens.
+ * Graphite surfaces over Windows 11 Mica, one ultraviolet accent, and
+ * reserved status colors. Display type is Mona Sans set wide; body is the
+ * native Segoe UI Variable; anything measured (sizes, paths, keys) is mono.
+ */
+@theme {
+  --font-display: "Mona Sans Variable", "Segoe UI Variable Display", "Segoe UI", sans-serif;
+  --font-sans: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono Variable", "Cascadia Mono", Consolas, monospace;
+
+  --color-backdrop: #0e0f13;
+  --color-panel: #16181d;
+  --color-raised: #1d2027;
+  --color-hover: #24272f;
+  --color-line: rgb(255 255 255 / 0.07);
+  --color-line-strong: rgb(255 255 255 / 0.12);
+
+  --color-ink: #eaebef;
+  --color-ink-2: #a7abb5;
+  --color-ink-3: #7b7f8a;
+
+  /* Ultraviolet: the single accent. Steps double as the treemap depth ramp. */
+  --color-uv-900: #2b2357;
+  --color-uv-700: #4f3fa0;
+  --color-uv-600: #6455bf;
+  --color-uv-500: #7a6fd4;
+  --color-uv-400: #928be4;
+  --color-uv-300: #b2aef5;
+
+  /* Status: reserved meaning, always paired with an icon and a label. */
+  --color-good: #3fc168;
+  --color-warn: #edb345;
+  --color-danger: #f05653;
+
+  --radius-panel: 10px;
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  html {
+    color-scheme: dark;
+    background: var(--color-backdrop);
+  }
+
+  /* With Mica the window itself is translucent; the content panel stays solid. */
+  html.mica {
+    background: transparent;
+  }
+
+  body {
+    margin: 0;
+    font-family: var(--font-sans);
+    font-size: 13.5px;
+    line-height: 1.45;
+    color: var(--color-ink);
+    -webkit-font-smoothing: antialiased;
+    user-select: none;
+    overflow: hidden;
+  }
+
+  ::selection {
+    background: var(--color-uv-600);
+    color: white;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-uv-400);
+    outline-offset: 2px;
+  }
+
+  input,
+  textarea {
+    user-select: text;
+  }
+
+  ::-webkit-scrollbar {
+    width: 12px;
+    height: 12px;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: rgb(255 255 255 / 0.1);
+    border-radius: 99px;
+    border: 3px solid transparent;
+    background-clip: padding-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgb(255 255 255 / 0.18);
+    background-clip: padding-box;
+    border: 3px solid transparent;
+  }
+  ::-webkit-scrollbar-track,
+  ::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+}
+
+@layer components {
+  /* Wide display face, used only for page titles and hero numbers. */
+  .display {
+    font-family: var(--font-display);
+    font-stretch: 118%;
+    font-weight: 720;
+    letter-spacing: -0.01em;
+  }
+
+  .num {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.02em;
+  }
+
+  .selectable {
+    user-select: text;
+  }
+}
+
+@keyframes sweep {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(250%);
+  }
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@utility animate-sweep {
+  animation: sweep 1.6s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+@utility animate-rise {
+  animation: rise 180ms ease-out both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
