@@ -53,7 +53,7 @@ src-tauri/src/
 
 ## Development
 
-Prerequisites: [Rust](https://rustup.rs) (MSVC toolchain), Node 20+, pnpm, and the Visual Studio C++ Build Tools.
+Prerequisites: [Rust](https://rustup.rs) (MSVC toolchain; `rust-toolchain.toml` pins the version), Node 20+, pnpm, and the Visual Studio C++ Build Tools.
 
 ```powershell
 pnpm install
@@ -71,7 +71,7 @@ Every push and pull request runs formatting, Clippy, the type check, and the tes
 1. Bump the version in `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`, and `package.json`, and commit.
 2. Tag and push: `git tag v0.2.0 && git push origin v0.2.0`
 
-The [release workflow](.github/workflows/release.yml) builds the installers on Windows and publishes them as a GitHub Release with generated notes. It refuses to run if the tag doesn't match the version in `tauri.conf.json`.
+The [release workflow](.github/workflows/release.yml) builds the installers on Windows and publishes them, with SHA-256 checksums and generated notes, as a GitHub Release. It refuses to run if the tag doesn't match the version in `tauri.conf.json`. The build runs with a read-only token; only the final publish step can write to the repository, and every action is pinned to a commit.
 
 ## Roadmap
 
