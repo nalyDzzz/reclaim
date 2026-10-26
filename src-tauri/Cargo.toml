@@ -3,6 +3,8 @@ name = "reclaim"
 version = "0.1.0"
 description = "Uninstall apps, find what is filling your drive, and clean up Windows"
 authors = ["Reclaim contributors"]
+license = "GPL-3.0-or-later"
+repository = "https://github.com/nalyDzzz/reclaim"
 edition = "2024"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

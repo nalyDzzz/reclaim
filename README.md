@@ -67,3 +67,7 @@ To test machine-wide cleanup and HKLM leftovers, use **Restart as administrator*
 - Browser extensions manager, startup apps manager, scheduled tasks review
 - Restore points before risky operations, plus a history of everything removed
 - Light theme
+
+## License
+
+Reclaim is free software under the [GNU General Public License v3.0 or later](LICENSE). You can use, study, change, and share it; versions you distribute must stay open under the same license.
