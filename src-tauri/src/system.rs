@@ -65,6 +65,7 @@ pub struct SystemInfo {
     mica: bool,
     app_version: String,
     install_kind: &'static str,
+    user_profile: String,
 }
 
 /// How this copy was installed, which decides whether it can update itself.
@@ -89,6 +90,7 @@ pub fn system_info(app: AppHandle) -> SystemInfo {
         mica: supports_mica(),
         app_version: app.package_info().version.to_string(),
         install_kind: install_kind(),
+        user_profile: crate::paths::known().user_profile.to_string_lossy().to_string(),
     }
 }
 

@@ -9,6 +9,7 @@ export interface SystemInfo {
   appVersion: string;
   /** "portable" covers the standalone exe and dev builds, which can't update themselves. */
   installKind: "nsis" | "msi" | "portable";
+  userProfile: string;
 }
 
 export interface Drive {

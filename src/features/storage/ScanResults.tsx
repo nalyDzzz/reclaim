@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { ArrowUp, ChevronRight, File, FolderClosed, FolderOpen, Lock, RefreshCw, Trash2, X } from "lucide-react";
+import { ArrowUp, ChevronRight, File, FolderClosed, FolderOpen, Lock, RefreshCw, Sparkles, Trash2, X } from "lucide-react";
 import {
   api,
   errorMessage,
@@ -13,7 +13,8 @@ import {
 } from "../../lib/api";
 import { formatBytes, formatCount, formatDate, formatDuration, formatPercent, plural } from "../../lib/format";
 import { useApp } from "../../state/app";
-import { cx, IconButton, Spinner, Tabs } from "../../components/ui";
+import { Button, cx, IconButton, Spinner, Tabs } from "../../components/ui";
+import { useAskAi } from "./askAi";
 import { CATEGORIES } from "./categories";
 import { DeleteDialog, type DeleteTarget } from "./DeleteDialog";
 import { Treemap } from "./Treemap";
@@ -29,6 +30,7 @@ export function ScanResults({ summary, onRescan, onClose }: { summary: ScanSumma
   const [map, setMap] = useState<TreemapNode | null>(null);
   const [hoverId, setHoverId] = useState<number | null>(null);
   const [deleting, setDeleting] = useState<DeleteTarget | null>(null);
+  const askAi = useAskAi();
 
   useEffect(() => {
     let alive = true;
@@ -83,6 +85,18 @@ export function ScanResults({ summary, onRescan, onClose }: { summary: ScanSumma
                 <> · {formatPercent(details.node.size, summary.totalBytes)} of the scan</>
               )}
             </span>
+            {/* A drive root is too broad to ask about. */}
+            {details && !/^[a-z]:\\?$/i.test(details.path) && (
+              <Button
+                variant="ghost"
+                size="sm"
+                icon={<Sparkles className="size-3.5 text-uv-400" />}
+                title="Copy a prompt asking an AI assistant what this folder is and whether it's safe to delete"
+                onClick={() => askAi(details.node.id)}
+              >
+                Ask AI
+              </Button>
+            )}
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-1">
@@ -133,11 +147,12 @@ export function ScanResults({ summary, onRescan, onClose }: { summary: ScanSumma
             hoverId={hoverId}
             onHover={setHoverId}
             onOpen={setNodeId}
+            onAskAi={askAi}
             onDelete={setDeleting}
           />
         </div>
       )}
-      {tab === "files" && <LargestFiles version={version} onDelete={setDeleting} />}
+      {tab === "files" && <LargestFiles version={version} onAskAi={askAi} onDelete={setDeleting} />}
       {tab === "types" && <FileTypes version={version} />}
 
       {deleting && <DeleteDialog target={deleting} onClose={onDeleted} />}
@@ -150,12 +165,14 @@ function FolderList({
   hoverId,
   onHover,
   onOpen,
+  onAskAi,
   onDelete,
 }: {
   details: NodeDetails | null;
   hoverId: number | null;
   onHover: (id: number | null) => void;
   onOpen: (id: number) => void;
+  onAskAi: (id: number) => void;
   onDelete: (t: DeleteTarget) => void;
 }) {
   if (!details) return <div className="border-l border-line" />;
@@ -165,7 +182,7 @@ function FolderList({
 
   return (
     <div className="flex min-h-0 flex-col border-l border-line">
-      <div className="grid grid-cols-[minmax(0,1fr)_64px_84px_56px] gap-3 border-b border-line px-4 py-2 text-[11.5px] font-medium text-ink-3">
+      <div className="grid grid-cols-[minmax(0,1fr)_52px_72px_88px] gap-3 border-b border-line px-4 py-2 text-[11.5px] font-medium text-ink-3">
         <span>Name</span>
         <span className="text-right">Share</span>
         <span className="text-right">Size</span>
@@ -188,7 +205,7 @@ function FolderList({
               onMouseEnter={() => onHover(item.id)}
               onClick={() => item.isDir && onOpen(item.id)}
               className={cx(
-                "group grid cursor-default grid-cols-[minmax(0,1fr)_64px_84px_56px] items-center gap-3 border-b border-line/60 px-4 py-[7px]",
+                "group grid cursor-default grid-cols-[minmax(0,1fr)_52px_72px_88px] items-center gap-3 border-b border-line/60 px-4 py-[7px]",
                 hoverId === item.id ? "bg-uv-600/12" : "hover:bg-white/3",
               )}
             >
@@ -209,6 +226,15 @@ function FolderList({
               <span className="num text-right text-[12px] text-ink-2">{formatPercent(item.size, total)}</span>
               <span className="num text-right text-[12.5px] text-ink">{formatBytes(item.size)}</span>
               <span className="flex justify-end gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+                <IconButton
+                  label="Ask AI (copies a prompt)"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onAskAi(item.id);
+                  }}
+                >
+                  <Sparkles className="size-3.5" />
+                </IconButton>
                 <IconButton
                   label="Show in File Explorer"
                   onClick={(e) => {
@@ -243,7 +269,15 @@ function FolderList({
   );
 }
 
-function LargestFiles({ version, onDelete }: { version: number; onDelete: (t: DeleteTarget) => void }) {
+function LargestFiles({
+  version,
+  onAskAi,
+  onDelete,
+}: {
+  version: number;
+  onAskAi: (id: number) => void;
+  onDelete: (t: DeleteTarget) => void;
+}) {
   const [files, setFiles] = useState<FileItem[] | null>(null);
 
   useEffect(() => {
@@ -260,7 +294,7 @@ function LargestFiles({ version, onDelete }: { version: number; onDelete: (t: De
   const largest = files[0]?.size ?? 1;
   return (
     <div className="flex min-h-0 flex-1 flex-col border-t border-line">
-      <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_110px_150px_56px] gap-4 border-b border-line px-7 py-2 text-[11.5px] font-medium text-ink-3">
+      <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_110px_150px_88px] gap-4 border-b border-line px-7 py-2 text-[11.5px] font-medium text-ink-3">
         <span>Name</span>
         <span>Folder</span>
         <span>Modified</span>
@@ -274,7 +308,7 @@ function LargestFiles({ version, onDelete }: { version: number; onDelete: (t: De
           return (
             <div
               key={f.id}
-              className="group grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_110px_150px_56px] items-center gap-4 border-b border-line/60 px-7 py-2 hover:bg-white/3"
+              className="group grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_110px_150px_88px] items-center gap-4 border-b border-line/60 px-7 py-2 hover:bg-white/3"
             >
               <div className="flex min-w-0 items-center gap-2.5">
                 <span className="shrink-0 text-ink-3 [&_svg]:size-4" title={CATEGORIES[f.category].label}>
@@ -295,6 +329,9 @@ function LargestFiles({ version, onDelete }: { version: number; onDelete: (t: De
                 <span className="num w-[68px] text-right text-[12.5px] text-ink">{formatBytes(f.size)}</span>
               </div>
               <span className="flex justify-end gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+                <IconButton label="Ask AI (copies a prompt)" onClick={() => onAskAi(f.id)}>
+                  <Sparkles className="size-3.5" />
+                </IconButton>
                 <IconButton label="Show in File Explorer" onClick={() => api.revealPath(f.path)}>
                   <FolderOpen className="size-3.5" />
                 </IconButton>
