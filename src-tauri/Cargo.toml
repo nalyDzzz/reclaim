@@ -1,6 +1,6 @@
 [package]
 name = "reclaim"
-version = "0.2.0"
+version = "0.2.1"
 description = "Uninstall apps, find what is filling your drive, and clean up Windows"
 authors = ["Reclaim contributors"]
 license = "GPL-3.0-or-later"
