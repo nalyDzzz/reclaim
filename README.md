@@ -16,7 +16,7 @@ Installed copies keep themselves up to date from 0.2.0 on: when a new version is
 
 **Apps.** Lists everything in the Windows uninstall registry (machine-wide 64/32-bit and per-user), with real icons and sizes measured from each app's folder. Uninstalling runs the app's own uninstaller and waits for it, including uninstallers that hand off to a helper process. Then Reclaim scans for leftovers: install folders, AppData, ProgramData, Start menu and desktop shortcuts, registry settings keys, startup entries, and App Paths registrations. Each leftover is rated Certain, Likely, or Possible; only Certain ones are pre-selected.
 
-**Storage.** A parallel scan of any drive or folder builds a size tree you can drill into with a treemap, a sortable folder list, the largest files, and a breakdown by file type. Delete to the Recycle Bin or permanently. OneDrive online-only files count as zero, and junctions and symlinks aren't followed, so nothing is counted twice.
+**Storage.** A parallel scan of any drive or folder builds a size tree you can drill into with a treemap, a sortable folder list, the largest files, and a breakdown by file type. Delete to the Recycle Bin or permanently. OneDrive online-only files count as zero, and junctions and symlinks aren't followed, so nothing is counted twice. To scan a folder straight from Explorer, right-click it (or a drive, or the empty space inside a folder) and choose **Scan with Reclaim**; on Windows 11 it's under **Show more options**.
 
 **Cleanup.** Temp folders, Windows Update downloads, Delivery Optimization, error reports, crash dumps, browser caches (Chrome, Edge, Brave, Vivaldi, Opera, Firefox), app caches (Discord, Slack, VS Code, Cursor, Spotify, Steam), and developer caches (npm, pnpm, Yarn, Bun, pip/uv, Cargo, NuGet, Gradle, Maven, Go). It warns when an app is open and holding its cache.
 
@@ -51,6 +51,8 @@ src-tauri/src/
   cleaner/              cleanup targets and deletion
   debloat/              AppX packages and registry tweaks
   paths.rs              known folders and the protected-path rules
+  launch.rs             --scan from Explorer's menu, single-instance handoff
+src-tauri/windows/      installer hooks that register the Explorer menu
 ```
 
 ## Development

@@ -100,10 +100,12 @@ pub fn relaunch_as_admin(app: AppHandle) -> CmdResult<()> {
     let exe = std::env::current_exe()?;
     let file = HSTRING::from(exe.as_os_str());
     let verb = HSTRING::from("runas");
+    let params = HSTRING::from(format!("{} {}", crate::launch::RELAUNCHED_FROM, std::process::id()));
     let mut info = SHELLEXECUTEINFOW {
         cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
         lpVerb: PCWSTR(verb.as_ptr()),
         lpFile: PCWSTR(file.as_ptr()),
+        lpParameters: PCWSTR(params.as_ptr()),
         nShow: SW_SHOWNORMAL.0,
         ..Default::default()
     };

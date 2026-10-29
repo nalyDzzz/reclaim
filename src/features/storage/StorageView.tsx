@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { FolderSearch, HardDrive, Usb } from "lucide-react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api, errorMessage, type Drive, type ScanProgress, type ScanSummary } from "../../lib/api";
@@ -12,7 +12,12 @@ type Phase =
   | { kind: "scanning"; path: string; progress: ScanProgress | null }
   | { kind: "results"; summary: ScanSummary };
 
-export function StorageView() {
+/** A new object per request, so asking for the same folder again rescans it. */
+export interface ScanRequest {
+  path: string;
+}
+
+export function StorageView({ request }: { request: ScanRequest | null }) {
   const { drives, toast, refreshDrives } = useApp();
   const [phase, setPhase] = useState<Phase>({ kind: "pick" });
   const scanSeq = useRef(0);
@@ -32,6 +37,15 @@ export function StorageView() {
       setPhase({ kind: "pick" });
     }
   };
+
+  // Effects run twice in development, so remember the request already started.
+  const startedRequest = useRef<ScanRequest | null>(null);
+  useEffect(() => {
+    if (request && request !== startedRequest.current) {
+      startedRequest.current = request;
+      scan(request.path);
+    }
+  }, [request]);
 
   const chooseFolder = async () => {
     const picked = await open({ directory: true, title: "Choose a folder to scan" });

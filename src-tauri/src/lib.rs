@@ -1,6 +1,7 @@
 mod cleaner;
 mod debloat;
 mod error;
+mod launch;
 mod paths;
 mod programs;
 mod storage;
@@ -11,13 +12,20 @@ use tauri::window::{Effect, EffectsBuilder};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    launch::wait_for_replaced_instance();
     tauri::Builder::default()
+        // First, so a second copy hands off before the others start up.
+        .plugin(tauri_plugin_single_instance::init(launch::on_second_instance))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(storage::ScanState::default())
         .manage(programs::icon::IconCache::default())
+        .manage(launch::PendingScan::from_command_line())
         .setup(|app| {
+            if system::is_elevated() {
+                launch::admit_unelevated_launches(app.handle());
+            }
             if let Some(window) = app.get_webview_window("main")
                 && system::supports_mica()
             {
@@ -31,6 +39,7 @@ pub fn run() {
             system::relaunch_as_admin,
             system::reveal_path,
             system::open_path,
+            launch::take_pending_scan,
             programs::list_programs,
             programs::program_exists,
             programs::measure_programs,

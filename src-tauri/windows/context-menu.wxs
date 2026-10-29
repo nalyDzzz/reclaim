@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  "Scan with Reclaim" in Explorer's right-click menu for the MSI, which
+  removes it again on uninstall. hooks.nsh registers the same entries for the
+  NSIS installer. It names reclaim.exe by path rather than by its File entry,
+  which sits in another feature (ICE69).
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Fragment>
+    <DirectoryRef Id="INSTALLDIR">
+      <Component Id="ScanContextMenu" Guid="*">
+        <RegistryKey Root="HKLM" Key="Software\Classes\Directory\shell\ReclaimScan">
+          <RegistryValue Type="string" Value="Scan with Reclaim" KeyPath="yes" />
+          <RegistryValue Type="string" Name="Icon" Value="&quot;[INSTALLDIR]reclaim.exe&quot;,0" />
+          <RegistryValue Type="string" Name="MultiSelectModel" Value="Single" />
+          <RegistryValue Type="string" Key="command" Value="&quot;[INSTALLDIR]reclaim.exe&quot; --scan &quot;%1&quot;" />
+        </RegistryKey>
+        <RegistryKey Root="HKLM" Key="Software\Classes\Directory\Background\shell\ReclaimScan">
+          <RegistryValue Type="string" Value="Scan with Reclaim" />
+          <RegistryValue Type="string" Name="Icon" Value="&quot;[INSTALLDIR]reclaim.exe&quot;,0" />
+          <RegistryValue Type="string" Name="MultiSelectModel" Value="Single" />
+          <RegistryValue Type="string" Key="command" Value="&quot;[INSTALLDIR]reclaim.exe&quot; --scan &quot;%V&quot;" />
+        </RegistryKey>
+        <RegistryKey Root="HKLM" Key="Software\Classes\Drive\shell\ReclaimScan">
+          <RegistryValue Type="string" Value="Scan with Reclaim" />
+          <RegistryValue Type="string" Name="Icon" Value="&quot;[INSTALLDIR]reclaim.exe&quot;,0" />
+          <RegistryValue Type="string" Name="MultiSelectModel" Value="Single" />
+          <RegistryValue Type="string" Key="command" Value="&quot;[INSTALLDIR]reclaim.exe&quot; --scan &quot;%1&quot;" />
+        </RegistryKey>
+      </Component>
+    </DirectoryRef>
+  </Fragment>
+</Wix>

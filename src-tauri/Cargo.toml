@@ -29,7 +29,7 @@ rayon = "1.12.0"
 trash = "5.2.9"
 png = "0.18.1"
 base64 = "0.23.1"
-windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi", "Win32_Storage_FileSystem", "Win32_Security", "Win32_System_Threading", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_UI_Shell_Common", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Com"] }
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi", "Win32_Storage_FileSystem", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Threading", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_UI_Shell_Common", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Com"] }
 anyhow = "1.0.104"
 tauri-plugin-dialog = "2"
 
@@ -43,4 +43,5 @@ panic = "abort"
 strip = true
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-single-instance = "2"
 tauri-plugin-updater = "2"

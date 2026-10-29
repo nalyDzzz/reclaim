@@ -1,5 +1,6 @@
 // Typed wrappers around the Rust commands in src-tauri/src.
 import { Channel, invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 export interface SystemInfo {
   elevated: boolean;
@@ -197,6 +198,9 @@ export const api = {
   relaunchAsAdmin: () => invoke<void>("relaunch_as_admin"),
   revealPath: (path: string) => invoke<void>("reveal_path", { path }),
   openPath: (path: string) => invoke<void>("open_path", { path }),
+  /** A folder Explorer's "Scan with Reclaim" menu asked for, taken once. */
+  takePendingScan: () => invoke<string | null>("take_pending_scan"),
+  onScanRequested: (handler: () => void) => listen("scan-requested", handler),
 
   listPrograms: () => invoke<Program[]>("list_programs"),
   programExists: (id: string) => invoke<boolean>("program_exists", { id }),
