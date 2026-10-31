@@ -6,7 +6,9 @@
 //! normalization, and every candidate carries a confidence level so the UI
 //! only pre-selects the ones that are almost certainly safe.
 
+mod classes;
 mod registrations;
+mod shortcuts;
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -187,18 +189,23 @@ impl Collector {
         self.items.push(Leftover { kind, path, value_name, size_bytes: 0, confidence, reason: reason.to_string(), label: None });
     }
 
-    fn push_registration(&mut self, found: registrations::Found) {
-        if self.seen.insert(format!("{:?}|{}", found.kind, found.id.to_lowercase())) {
-            self.items.push(Leftover {
-                kind: found.kind,
-                path: found.id,
-                value_name: None,
-                size_bytes: 0,
-                confidence: found.confidence,
-                reason: found.reason.to_string(),
-                label: found.label,
-            });
+    fn push_item(&mut self, item: Leftover) {
+        let key = format!("{:?}|{}|{}", item.kind, item.path.to_lowercase(), item.value_name.as_deref().unwrap_or(""));
+        if self.seen.insert(key) {
+            self.items.push(item);
         }
+    }
+
+    fn push_registration(&mut self, found: registrations::Found) {
+        self.push_item(Leftover {
+            kind: found.kind,
+            path: found.id,
+            value_name: None,
+            size_bytes: 0,
+            confidence: found.confidence,
+            reason: found.reason.to_string(),
+            label: found.label,
+        });
     }
 
     fn push_path(&mut self, path: &Path, confidence: Confidence, reason: &str) {
@@ -279,34 +286,7 @@ fn scan_filesystem(q: &LeftoverQuery, names: &NameVariants, out: &mut Collector)
         }
     }
 
-    // Start menu, startup, and desktop shortcuts.
-    let shortcut_dirs = [
-        k.start_menu_user.clone(),
-        k.start_menu_common.clone(),
-        k.start_menu_user.join("Startup"),
-        k.start_menu_common.join("Startup"),
-        k.user_profile.join("Desktop"),
-        std::env::var_os("PUBLIC").map(|p| PathBuf::from(p).join("Desktop")).unwrap_or_default(),
-    ];
-    for dir in shortcut_dirs {
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let name = entry.file_name().to_string_lossy().to_string();
-            if path.is_dir() {
-                if names.matches_name(&name) || names.matches_publisher(&name) {
-                    let only_ours = std::fs::read_dir(&path)
-                        .map(|it| it.flatten().all(|e| names.matches_name(&stem(&e.path())) || is_uninstall_shortcut(&e.path())))
-                        .unwrap_or(false);
-                    if names.matches_name(&name) || only_ours {
-                        out.push_path(&path, Confidence::High, "Start menu folder");
-                    }
-                }
-            } else if is_shortcut(&path) && names.matches_name(&stem(&path)) {
-                out.push_path(&path, Confidence::High, "Shortcut");
-            }
-        }
-    }
+    shortcuts::find(names, &app_folders(q), out);
 }
 
 /// Looks inside a folder named after the publisher. `confidence` is the most
@@ -499,19 +479,29 @@ pub async fn scan_leftovers(query: LeftoverQuery) -> CmdResult<Vec<Leftover>> {
         let mut out = Collector { items: Vec::new(), seen: HashSet::new() };
         scan_filesystem(&query, &names, &mut out);
         scan_registry(&query, &names, &mut out);
-        for found in registrations::find(&app_folders(&query)) {
+        let app_folders = app_folders(&query);
+        for found in registrations::find(&app_folders) {
             out.push_registration(found);
         }
+        for item in classes::find(&app_folders) {
+            out.push_item(item);
+        }
+        for item in classes::registered_applications(&app_folders, &out.items) {
+            out.push_item(item);
+        }
 
-        // Drop entries nested inside another candidate folder.
+        // Drop entries inside a folder or registry key that's already listed.
         let folders: Vec<String> =
             out.items.iter().filter(|i| i.kind == LeftoverKind::Folder).map(|i| normalize(Path::new(&i.path))).collect();
-        out.items.retain(|i| {
-            if !matches!(i.kind, LeftoverKind::Folder | LeftoverKind::File) {
-                return true;
-            }
-            let p = normalize(Path::new(&i.path));
-            !folders.iter().any(|f| p != *f && p.starts_with(&format!("{f}\\")))
+        let keys: Vec<String> = out.items.iter().filter(|i| i.kind == LeftoverKind::RegistryKey).map(|i| i.path.to_lowercase()).collect();
+        let inside = |path: &str, parents: &[String], or_equal: bool| {
+            parents.iter().any(|parent| (or_equal || path != parent) && (path == parent || path.starts_with(&format!("{parent}\\"))))
+        };
+        out.items.retain(|i| match i.kind {
+            LeftoverKind::Folder | LeftoverKind::File => !inside(&normalize(Path::new(&i.path)), &folders, false),
+            LeftoverKind::RegistryKey => !inside(&i.path.to_lowercase(), &keys, false),
+            LeftoverKind::RegistryValue => !inside(&i.path.to_lowercase(), &keys, true),
+            _ => true,
         });
         out.items.par_iter_mut().for_each(|item| {
             if matches!(item.kind, LeftoverKind::Folder | LeftoverKind::File) {
@@ -615,11 +605,15 @@ fn split_reg_path(path: &str) -> anyhow::Result<(&'static str, RegKey, String)> 
 
 /// A new file in `dir` to back `what` up into, named so backups sort by time.
 fn backup_file(dir: &Path, label: &str, what: &str, extension: &str) -> anyhow::Result<PathBuf> {
+    // Backups run side by side, and names get cut short, so two in the same
+    // second could otherwise share a name.
+    static COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     std::fs::create_dir_all(dir)?;
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let n = COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     // ASCII only, so cutting it to length can't split a character.
     let safe: String = what.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
-    Ok(dir.join(format!("{stamp}_{label}_{}.{extension}", &safe[safe.len().saturating_sub(80)..])))
+    Ok(dir.join(format!("{stamp}_{n:04}_{label}_{}.{extension}", &safe[safe.len().saturating_sub(80)..])))
 }
 
 fn backup_key(backup_dir: &Path, label: &str, sub: &str) -> anyhow::Result<()> {
@@ -695,10 +689,31 @@ fn delete_permanently(path: &Path) -> anyhow::Result<()> {
     })
 }
 
-/// Removes one leftover, to the Recycle Bin unless `permanent`. Registry
-/// entries, services, and tasks are backed up to `backup_dir` first; `None`
-/// means the caller already did that.
-fn remove_one(item: &Leftover, backup_dir: Option<&Path>, permanent: bool) -> anyhow::Result<()> {
+/// Backs up a registry entry, service, or task before it's removed. Files
+/// need none, since they go to the Recycle Bin or are deleted on purpose.
+fn back_up(item: &Leftover, dir: &Path) -> anyhow::Result<()> {
+    match item.kind {
+        LeftoverKind::Folder | LeftoverKind::File => Ok(()),
+        LeftoverKind::RegistryKey | LeftoverKind::RegistryValue => {
+            let (label, hive, sub) = split_reg_path(&item.path)?;
+            if hive.open_subkey_with_flags(&sub, KEY_READ | KEY_WOW64_64KEY).is_err() {
+                return Ok(()); // already gone
+            }
+            backup_key(dir, label, &sub)
+        }
+        LeftoverKind::Service | LeftoverKind::ScheduledTask | LeftoverKind::FirewallRule => {
+            if registrations::exists(item) {
+                registrations::backup(item, dir)
+            } else {
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Removes one leftover, to the Recycle Bin unless `permanent`. Callers
+/// back it up with `back_up` first.
+fn remove_one(item: &Leftover, permanent: bool) -> anyhow::Result<()> {
     match item.kind {
         LeftoverKind::Folder | LeftoverKind::File => {
             let path = Path::new(&item.path);
@@ -718,34 +733,26 @@ fn remove_one(item: &Leftover, backup_dir: Option<&Path>, permanent: bool) -> an
                 _ => trash::delete(path).map_err(|_| Refused::Denied(RECYCLE_FAILED))?,
             }
         }
-        LeftoverKind::Service | LeftoverKind::ScheduledTask | LeftoverKind::FirewallRule => {
-            if let Some(dir) = backup_dir
-                && registrations::exists(item)
-            {
-                registrations::backup(item, dir)?;
-            }
-            registrations::remove(item)?;
-        }
+        LeftoverKind::Service | LeftoverKind::ScheduledTask | LeftoverKind::FirewallRule => registrations::remove(item)?,
         LeftoverKind::RegistryKey => {
-            let (label, hive, sub) = split_reg_path(&item.path)?;
-            crate::error::ensure!(!is_protected_reg_key(&sub), "This registry key is protected");
+            let (_, hive, sub) = split_reg_path(&item.path)?;
             if hive.open_subkey_with_flags(&sub, KEY_READ | KEY_WOW64_64KEY).is_err() {
                 return Ok(()); // already gone
             }
-            if let Some(dir) = backup_dir {
-                backup_key(dir, label, &sub)?;
-            }
+            let allowed = !is_protected_reg_key(&sub) || classes::may_remove_key(&hive, &sub);
+            crate::error::ensure!(allowed, "This registry key is protected");
             let (parent, leaf) = sub.rsplit_once('\\').context("Invalid registry path")?;
             let parent_key = hive.open_subkey_with_flags(parent, KEY_ALL_ACCESS | KEY_WOW64_64KEY).map_err(access_error)?;
             parent_key.delete_subkey_all(leaf).map_err(access_error)?;
         }
         LeftoverKind::RegistryValue => {
-            let (label, hive, sub) = split_reg_path(&item.path)?;
-            crate::error::ensure!(is_per_program_value_key(&sub) || !is_protected_reg_key(&sub), "This registry key is protected");
-            let value = item.value_name.as_deref().context("Missing value name")?;
-            if let Some(dir) = backup_dir {
-                backup_key(dir, label, &sub)?;
+            let (_, hive, sub) = split_reg_path(&item.path)?;
+            if hive.open_subkey_with_flags(&sub, KEY_READ | KEY_WOW64_64KEY).is_err() {
+                return Ok(()); // already gone, key and all
             }
+            let allowed = is_per_program_value_key(&sub) || classes::may_remove_value(&sub) || !is_protected_reg_key(&sub);
+            crate::error::ensure!(allowed, "This registry key is protected");
+            let value = item.value_name.as_deref().context("Missing value name")?;
             let key = hive.open_subkey_with_flags(&sub, KEY_ALL_ACCESS | KEY_WOW64_64KEY).map_err(access_error)?;
             match key.delete_value(value) {
                 Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(access_error(e)),
@@ -847,14 +854,19 @@ pub fn remove_listed(list: &Path, sha256: &str, permanent: bool) {
     for item in items.iter().filter(|item| is_machine_wide(item)) {
         // The copy that asked already backed these up: it only asks after a
         // backup succeeded and the removal was denied.
-        let _ = remove_one(item, None, permanent);
+        let _ = remove_one(item, permanent);
     }
 }
 
-/// Removes each item, then retries the machine-wide ones Windows refused in
-/// an elevated copy, so one UAC prompt covers Program Files and HKLM.
+/// Backs every item up, then removes the ones whose backup worked, and
+/// retries the machine-wide ones Windows refused in an elevated copy, so
+/// one UAC prompt covers Program Files and HKLM.
 fn remove_all(items: &[Leftover], backup_dir: &Path, permanent: bool) -> Vec<anyhow::Result<()>> {
-    let mut outcomes: Vec<_> = items.iter().map(|item| remove_one(item, Some(backup_dir), permanent)).collect();
+    // Each backup runs reg.exe for about a tenth of a second, and an app can
+    // leave hundreds of registry entries, so they run side by side.
+    let backed_up: Vec<anyhow::Result<()>> = items.par_iter().map(|item| back_up(item, backup_dir)).collect();
+    let mut outcomes: Vec<_> =
+        items.iter().zip(backed_up).map(|(item, backup)| backup.and_then(|()| remove_one(item, permanent))).collect();
     if is_elevated() {
         return outcomes;
     }
@@ -1033,7 +1045,7 @@ mod tests {
             let user = std::env::var("USERNAME").unwrap();
             let acl = |args: &[&str]| Command::new("icacls").arg(&dir).args(args).output().unwrap().status.success();
             assert!(acl(&["/deny", &format!("{user}:(OI)(CI)(DE,DC)")]));
-            let result = remove_one(&leftover(LeftoverKind::Folder, &dir), None, permanent);
+            let result = remove_one(&leftover(LeftoverKind::Folder, &dir), permanent);
             acl(&["/remove:d", &user, "/T"]);
             let _ = std::fs::remove_dir_all(&dir);
             let err = result.expect_err("removal should be refused");
@@ -1046,7 +1058,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("reclaim-permanent-test-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("nested")).unwrap();
         std::fs::write(dir.join(r"nested\file.bin"), b"x").unwrap();
-        let result = remove_one(&leftover(LeftoverKind::Folder, &dir), None, true);
+        let result = remove_one(&leftover(LeftoverKind::Folder, &dir), true);
         let survived = dir.exists();
         let _ = std::fs::remove_dir_all(&dir);
         result.unwrap();

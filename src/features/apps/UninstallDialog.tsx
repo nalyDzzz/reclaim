@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { CalendarClock, CircleCheck, Cog, FileText, Folder, KeyRound, ListTree, Shield, TriangleAlert } from "lucide-react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { CalendarClock, ChevronDown, CircleCheck, Cog, FileText, Folder, KeyRound, ListTree, Shield, TriangleAlert } from "lucide-react";
 import { api, errorMessage, type Leftover, type Program } from "../../lib/api";
 import { formatBytes, plural } from "../../lib/format";
 import { useApp } from "../../state/app";
@@ -393,6 +393,102 @@ const KIND_GROUP: Record<Leftover["kind"], number> = {
   firewallRule: 2,
 };
 
+/** Items sharing a reason and confidence show as one row once there are this many, like an app's 100 file types. */
+const BUNDLE_AT = 4;
+
+type Row = { type: "item"; i: number } | { type: "bundle"; key: string; ids: number[] };
+
+function rowsOf(ids: number[], leftovers: Leftover[]): Row[] {
+  const keyOf = (i: number) => `${leftovers[i].confidence}|${leftovers[i].reason}`;
+  const byKey = new Map<string, number[]>();
+  ids.forEach((i) => byKey.set(keyOf(i), [...(byKey.get(keyOf(i)) ?? []), i]));
+  const rows: Row[] = [];
+  const placed = new Set<string>();
+  for (const i of ids) {
+    const key = keyOf(i);
+    const same = byKey.get(key) ?? [];
+    if (same.length < BUNDLE_AT) rows.push({ type: "item", i });
+    else if (!placed.has(key)) {
+      placed.add(key);
+      rows.push({ type: "bundle", key, ids: same });
+    }
+  }
+  return rows;
+}
+
+const ROW = "grid cursor-default grid-cols-[16px_16px_minmax(0,1fr)_auto] items-start gap-3 border-b border-line/60 px-3 py-2.5 last:border-b-0";
+
+function ItemRow({ leftover: l, selected, nested, onToggle }: { leftover: Leftover; selected: boolean; nested: boolean; onToggle: (on: boolean) => void }) {
+  const conf = CONFIDENCE[l.confidence];
+  return (
+    <li
+      onClick={() => onToggle(!selected)}
+      className={cx(ROW, nested && "pl-10", selected ? "bg-uv-600/8" : cx(nested && "bg-backdrop/30", "hover:bg-white/3"))}
+    >
+      <Checkbox label={describe(l)} checked={selected} onChange={onToggle} className="mt-0.5" />
+      <span className="mt-0.5 text-ink-3 [&_svg]:size-4">{KIND_ICON[l.kind]}</span>
+      <div className="min-w-0">
+        <div className="num truncate text-[12px] text-ink" title={l.path}>
+          {l.label ?? l.path}
+          {!l.label && l.valueName && <span className="text-uv-300"> → {l.valueName}</span>}
+        </div>
+        {!nested && (
+          <div className="mt-0.5 flex items-center gap-2 text-[12px] text-ink-3">
+            <Badge tone={conf.tone}>{conf.label}</Badge>
+            {l.reason}
+          </div>
+        )}
+      </div>
+      <span className="num pt-0.5 text-[12px] text-ink-2">{l.sizeBytes > 0 ? formatBytes(l.sizeBytes) : ""}</span>
+    </li>
+  );
+}
+
+function BundleRow({
+  leftovers,
+  selectedCount,
+  expanded,
+  onToggle,
+  onExpand,
+}: {
+  leftovers: Leftover[];
+  selectedCount: number;
+  expanded: boolean;
+  onToggle: (on: boolean) => void;
+  onExpand: () => void;
+}) {
+  const [first] = leftovers;
+  const conf = CONFIDENCE[first.confidence];
+  const all = selectedCount === leftovers.length;
+  const bytes = leftovers.reduce((sum, l) => sum + l.sizeBytes, 0);
+  return (
+    <li onClick={() => onToggle(!all)} className={cx(ROW, selectedCount > 0 ? "bg-uv-600/8" : "hover:bg-white/3")}>
+      <Checkbox label={first.reason} checked={all} indeterminate={!all && selectedCount > 0} onChange={onToggle} className="mt-0.5" />
+      <span className="mt-0.5 text-ink-3 [&_svg]:size-4">{KIND_ICON[first.kind]}</span>
+      <div className="min-w-0">
+        <div className="truncate text-[12px] text-ink">{first.reason}</div>
+        <div className="mt-0.5 flex items-center gap-2 text-[12px] text-ink-3">
+          <Badge tone={conf.tone}>{conf.label}</Badge>
+          <span className="num">{leftovers.length} entries</span>
+          <button
+            type="button"
+            aria-expanded={expanded}
+            onClick={(e) => {
+              e.stopPropagation();
+              onExpand();
+            }}
+            className="inline-flex items-center gap-0.5 text-uv-300 hover:underline"
+          >
+            {expanded ? "Hide" : "Show"}
+            <ChevronDown className={cx("size-3 transition-transform", expanded && "rotate-180")} />
+          </button>
+        </div>
+      </div>
+      <span className="num pt-0.5 text-[12px] text-ink-2">{bytes > 0 ? formatBytes(bytes) : ""}</span>
+    </li>
+  );
+}
+
 const CONFIDENCE: Record<Leftover["confidence"], { label: string; tone: "good" | "uv" | "neutral" }> = {
   high: { label: "Certain", tone: "good" },
   medium: { label: "Likely", tone: "uv" },
@@ -423,16 +519,19 @@ function LeftoverReview({
       { label: "Services, tasks, and firewall rules", ids: [] as number[] },
     ];
     leftovers.forEach((l, i) => groups[KIND_GROUP[l.kind]].ids.push(i));
-    return groups.filter((g) => g.ids.length > 0);
+    return groups.filter((g) => g.ids.length > 0).map((g) => ({ ...g, rows: rowsOf(g.ids, leftovers) }));
   }, [leftovers]);
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
   const selectedBytes = leftovers.reduce((sum, l, i) => sum + (selected.has(i) ? l.sizeBytes : 0), 0);
-  const toggle = (i: number, on: boolean) => {
+  const setMany = (ids: number[], on: boolean) => {
     const next = new Set(selected);
-    if (on) next.add(i);
-    else next.delete(i);
+    ids.forEach((i) => (on ? next.add(i) : next.delete(i)));
     setSelected(next);
   };
+  const itemRow = (i: number, nested = false) => (
+    <ItemRow key={i} leftover={leftovers[i]} selected={selected.has(i)} nested={nested} onToggle={(on) => setMany([i], on)} />
+  );
 
   if (leftovers.length === 0) {
     return (
@@ -488,42 +587,32 @@ function LeftoverReview({
                   label={`Select all ${g.label.toLowerCase()}`}
                   checked={all}
                   indeterminate={!all && some}
-                  onChange={(on) => {
-                    const next = new Set(selected);
-                    g.ids.forEach((i) => (on ? next.add(i) : next.delete(i)));
-                    setSelected(next);
-                  }}
+                  onChange={(on) => setMany(g.ids, on)}
                 />
                 <span className="text-[12px] font-semibold text-ink">{g.label}</span>
                 <span className="num text-[11px] text-ink-3">{g.ids.length}</span>
               </header>
               <ul>
-                {g.ids.map((i) => {
-                  const l = leftovers[i];
-                  const conf = CONFIDENCE[l.confidence];
+                {g.rows.map((row) => {
+                  if (row.type === "item") return itemRow(row.i);
+                  const key = `${g.label}|${row.key}`;
+                  const open = expanded.has(key);
                   return (
-                    <li
-                      key={i}
-                      onClick={() => toggle(i, !selected.has(i))}
-                      className={cx(
-                        "grid cursor-default grid-cols-[16px_16px_minmax(0,1fr)_auto] items-start gap-3 border-b border-line/60 px-3 py-2.5 last:border-b-0",
-                        selected.has(i) ? "bg-uv-600/8" : "hover:bg-white/3",
-                      )}
-                    >
-                      <Checkbox label={describe(l)} checked={selected.has(i)} onChange={(on) => toggle(i, on)} className="mt-0.5" />
-                      <span className="mt-0.5 text-ink-3 [&_svg]:size-4">{KIND_ICON[l.kind]}</span>
-                      <div className="min-w-0">
-                        <div className="num truncate text-[12px] text-ink" title={l.path}>
-                          {l.label ?? l.path}
-                          {!l.label && l.valueName && <span className="text-uv-300"> → {l.valueName}</span>}
-                        </div>
-                        <div className="mt-0.5 flex items-center gap-2 text-[12px] text-ink-3">
-                          <Badge tone={conf.tone}>{conf.label}</Badge>
-                          {l.reason}
-                        </div>
-                      </div>
-                      <span className="num pt-0.5 text-[12px] text-ink-2">{l.sizeBytes > 0 ? formatBytes(l.sizeBytes) : ""}</span>
-                    </li>
+                    <Fragment key={key}>
+                      <BundleRow
+                        leftovers={row.ids.map((i) => leftovers[i])}
+                        selectedCount={row.ids.filter((i) => selected.has(i)).length}
+                        expanded={open}
+                        onToggle={(on) => setMany(row.ids, on)}
+                        onExpand={() => {
+                          const next = new Set(expanded);
+                          if (open) next.delete(key);
+                          else next.add(key);
+                          setExpanded(next);
+                        }}
+                      />
+                      {open && row.ids.map((i) => itemRow(i, true))}
+                    </Fragment>
                   );
                 })}
               </ul>
