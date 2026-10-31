@@ -12,7 +12,6 @@ mod shortcuts;
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use anyhow::Context;
 use rayon::prelude::*;
@@ -605,8 +604,8 @@ fn split_reg_path(path: &str) -> anyhow::Result<(&'static str, RegKey, String)> 
 
 /// A new file in `dir` to back `what` up into, named so backups sort by time.
 fn backup_file(dir: &Path, label: &str, what: &str, extension: &str) -> anyhow::Result<PathBuf> {
-    // Backups run side by side, and names get cut short, so two in the same
-    // second could otherwise share a name.
+    // Names get cut short, so two backups in the same second could
+    // otherwise share one.
     static COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     std::fs::create_dir_all(dir)?;
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
@@ -616,15 +615,60 @@ fn backup_file(dir: &Path, label: &str, what: &str, extension: &str) -> anyhow::
     Ok(dir.join(format!("{stamp}_{n:04}_{label}_{}.{extension}", &safe[safe.len().saturating_sub(80)..])))
 }
 
+/// Writes `text` as UTF-16 with a byte order mark: what `.reg` files use,
+/// and what task XML declares.
+fn write_utf16(path: &Path, text: &str) -> std::io::Result<()> {
+    let bytes: Vec<u8> = std::iter::once(0xFEFF).chain(text.encode_utf16()).flat_map(u16::to_le_bytes).collect();
+    std::fs::write(path, bytes)
+}
+
+/// A value as regedit writes it in a `.reg` file.
+fn reg_data(value: &winreg::RegValue) -> String {
+    let hex = |bytes: &[u8]| bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(",");
+    let text = || {
+        let units: Vec<u16> = value.bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        String::from_utf16_lossy(&units).trim_end_matches('\0').to_string()
+    };
+    match value.vtype {
+        // A quoted string can't hold line breaks, so those keep their bytes.
+        winreg::enums::REG_SZ if !text().contains(['\r', '\n', '\0']) => format!("\"{}\"", reg_escape(&text())),
+        winreg::enums::REG_DWORD if value.bytes.len() == 4 => {
+            format!("dword:{:08x}", u32::from_le_bytes([value.bytes[0], value.bytes[1], value.bytes[2], value.bytes[3]]))
+        }
+        winreg::enums::REG_BINARY => format!("hex:{}", hex(&value.bytes)),
+        ref other => format!("hex({:x}):{}", other.clone() as u32, hex(&value.bytes)),
+    }
+}
+
+fn reg_escape(text: &str) -> String {
+    text.replace('\\', r"\\").replace('"', "\\\"")
+}
+
+/// Appends `key` and everything under it to `out` in regedit's format.
+fn export_key(key: &RegKey, path: &str, out: &mut String) {
+    out.push_str(&format!("[{path}]\r\n"));
+    for (name, value) in key.enum_values().flatten() {
+        let name = if name.is_empty() { "@".to_string() } else { format!("\"{}\"", reg_escape(&name)) };
+        out.push_str(&format!("{name}={}\r\n", reg_data(&value)));
+    }
+    out.push_str("\r\n");
+    for sub in key.enum_keys().flatten() {
+        if let Ok(child) = key.open_subkey_with_flags(&sub, KEY_READ | KEY_WOW64_64KEY) {
+            export_key(&child, &format!(r"{path}\{sub}"), out);
+        }
+    }
+}
+
+/// Saves a key and everything under it as a `.reg` file, which restores it
+/// when opened. Written directly rather than by `reg export`: that takes a
+/// tenth of a second a key, and an app can leave hundreds.
 fn backup_key(backup_dir: &Path, label: &str, sub: &str) -> anyhow::Result<()> {
-    use std::os::windows::process::CommandExt;
-    let file = backup_file(backup_dir, label, sub, "reg")?;
-    let status = Command::new(paths::system32("reg.exe"))
-        .args(["export", &format!(r"{label}\{sub}"), &file.to_string_lossy(), "/y", "/reg:64"])
-        .creation_flags(CREATE_NO_WINDOW)
-        .status()?;
-    crate::error::ensure!(status.success(), "Couldn't back up the key before removing it");
-    Ok(())
+    let (hive, root) = if label == "HKCU" { (HKEY_CURRENT_USER, "HKEY_CURRENT_USER") } else { (HKEY_LOCAL_MACHINE, "HKEY_LOCAL_MACHINE") };
+    let failed = "Couldn't back up the key before removing it";
+    let key = RegKey::predef(hive).open_subkey_with_flags(sub, KEY_READ | KEY_WOW64_64KEY).context(failed)?;
+    let mut reg = String::from("Windows Registry Editor Version 5.00\r\n\r\n");
+    export_key(&key, &format!(r"{root}\{sub}"), &mut reg);
+    write_utf16(&backup_file(backup_dir, label, sub, "reg")?, &reg).context(failed)
 }
 
 /// Why Windows refused a removal, when Reclaim can still do something about it.
@@ -862,9 +906,7 @@ pub fn remove_listed(list: &Path, sha256: &str, permanent: bool) {
 /// retries the machine-wide ones Windows refused in an elevated copy, so
 /// one UAC prompt covers Program Files and HKLM.
 fn remove_all(items: &[Leftover], backup_dir: &Path, permanent: bool) -> Vec<anyhow::Result<()>> {
-    // Each backup runs reg.exe for about a tenth of a second, and an app can
-    // leave hundreds of registry entries, so they run side by side.
-    let backed_up: Vec<anyhow::Result<()>> = items.par_iter().map(|item| back_up(item, backup_dir)).collect();
+    let backed_up: Vec<anyhow::Result<()>> = items.iter().map(|item| back_up(item, backup_dir)).collect();
     let mut outcomes: Vec<_> =
         items.iter().zip(backed_up).map(|(item, backup)| backup.and_then(|()| remove_one(item, permanent))).collect();
     if is_elevated() {
@@ -1051,6 +1093,46 @@ mod tests {
             let err = result.expect_err("removal should be refused");
             assert!(was_denied(&err), "permanent={permanent}: {err:#}");
         }
+    }
+
+    #[test]
+    fn registry_backups_restore_exactly() {
+        use winreg::RegValue;
+        use winreg::enums::{KEY_ALL_ACCESS, REG_BINARY, REG_EXPAND_SZ, REG_SZ};
+        let sub = format!(r"Software\ReclaimBackupTest{}", std::process::id());
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        let (key, _) = hkcu.create_subkey(&sub).unwrap();
+        let utf16 = |s: &str| s.encode_utf16().chain([0]).flat_map(u16::to_le_bytes).collect::<Vec<u8>>();
+        key.set_value("", &r#"C:\Program Files\App "quoted""#).unwrap();
+        key.set_raw_value("Lines", &RegValue { bytes: utf16("one\r\ntwo").into(), vtype: REG_SZ }).unwrap();
+        key.set_raw_value("Expand", &RegValue { bytes: utf16(r"%SystemRoot%\x.dll").into(), vtype: REG_EXPAND_SZ }).unwrap();
+        key.set_value("Dword", &0xDEAD_BEEFu32).unwrap();
+        key.set_value("Qword", &0x0123_4567_89AB_CDEFu64).unwrap();
+        key.set_raw_value("Binary", &RegValue { bytes: vec![0, 1, 255].into(), vtype: REG_BINARY }).unwrap();
+        key.set_value("Multi", &vec!["a".to_string(), "b c".to_string()]).unwrap();
+        key.create_subkey(r"Child\Grandchild").unwrap().0.set_value("Leaf", &"x").unwrap();
+
+        fn snapshot(key: &RegKey) -> Vec<String> {
+            let mut out: Vec<String> = key.enum_values().flatten().map(|(n, v)| format!("{n}={:?}:{:?}", v.vtype, v.bytes)).collect();
+            for sub in key.enum_keys().flatten() {
+                out.extend(snapshot(&key.open_subkey(&sub).unwrap()).into_iter().map(|line| format!(r"{sub}\{line}")));
+            }
+            out.sort();
+            out
+        }
+        let before = snapshot(&key);
+        drop(key);
+        let dir = std::env::temp_dir().join(format!("reclaim-backup-test-{}", std::process::id()));
+        backup_key(&dir, "HKCU", &sub).unwrap();
+        let file = std::fs::read_dir(&dir).unwrap().next().unwrap().unwrap().path();
+        hkcu.open_subkey_with_flags("Software", KEY_ALL_ACCESS).unwrap().delete_subkey_all(sub.split('\\').nth(1).unwrap()).unwrap();
+        let imported = std::process::Command::new(paths::system32("reg.exe")).arg("import").arg(&file).output().unwrap();
+        let after = hkcu.open_subkey(&sub).map(|k| snapshot(&k));
+        let _ = hkcu.delete_subkey_all(&sub);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(imported.status.success(), "{}", String::from_utf8_lossy(&imported.stderr));
+        assert_eq!(after.unwrap(), before);
     }
 
     #[test]

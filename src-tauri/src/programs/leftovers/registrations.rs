@@ -23,7 +23,7 @@ use windows::core::{BSTR, HSTRING, Interface, PCWSTR};
 use winreg::RegKey;
 use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_64KEY};
 
-use super::{CREATE_NO_WINDOW, Confidence, Leftover, LeftoverKind, Refused, backup_file, backup_key, points_into};
+use super::{CREATE_NO_WINDOW, Confidence, Leftover, LeftoverKind, Refused, backup_file, backup_key, points_into, write_utf16};
 use crate::paths::{self, expand_env};
 use crate::programs::split_command;
 
@@ -91,13 +91,6 @@ pub(super) fn remove(item: &Leftover) -> anyhow::Result<()> {
         LeftoverKind::ScheduledTask => remove_task(&item.path),
         _ => remove_firewall_rule(&item.path),
     }
-}
-
-/// Writes `text` as UTF-16 with a byte order mark: what `.reg` files use,
-/// and what task XML declares.
-fn write_utf16(path: &Path, text: &str) -> std::io::Result<()> {
-    let bytes: Vec<u8> = std::iter::once(0xFEFF).chain(text.encode_utf16()).flat_map(u16::to_le_bytes).collect();
-    std::fs::write(path, bytes)
 }
 
 fn hklm(sub: &str) -> std::io::Result<RegKey> {
