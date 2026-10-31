@@ -207,7 +207,9 @@ pub fn is_protected(path: &Path) -> bool {
         n(&k.local_app_data.join("Microsoft\\WindowsApps")),
         n(&k.local_app_data.join("Packages")),
     ];
-    if protected_trees.iter().any(|root| is_under(&p, root)) {
+    // The all-users Start menu sits inside ProgramData\Microsoft, but what's
+    // in it are apps' shortcuts. The folders themselves stay protected below.
+    if protected_trees.iter().any(|root| is_under(&p, root)) && !is_under(&p, &n(&k.start_menu_common)) {
         return true;
     }
     let drive = &p[..2];
@@ -247,6 +249,8 @@ pub fn is_protected(path: &Path) -> bool {
         n(&k.saved_games),
         n(&k.start_menu_user),
         n(&k.start_menu_common),
+        n(&k.start_menu_user.join("Startup")),
+        n(&k.start_menu_common.join("Startup")),
         n(k.start_menu_user.parent().unwrap_or(&k.start_menu_user)),
         n(k.start_menu_common.parent().unwrap_or(&k.start_menu_common)),
     ];
@@ -400,6 +404,11 @@ mod tests {
         assert!(is_protected(&k.local_app_data));
         assert!(is_protected(&k.user_profile));
         assert!(is_protected(Path::new("relative\\path")));
+        assert!(is_protected(&k.start_menu_common));
+        assert!(is_protected(&k.start_menu_common.join("Startup")));
+        assert!(is_protected(&k.start_menu_user.join("Startup")));
+        assert!(!is_protected(&k.start_menu_common.join("Git")));
+        assert!(is_protected(&k.program_data.join(r"Microsoft\Windows\WER")));
         assert!(is_protected(&k.documents));
         assert!(is_protected(&k.saved_games));
         assert!(!is_protected(&k.program_files.join("SomeVendor")));
