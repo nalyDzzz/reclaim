@@ -31,6 +31,7 @@ png = "0.18.1"
 base64 = "0.23.1"
 windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi", "Win32_Storage_FileSystem", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Threading", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_UI_Shell_Common", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Com"] }
 anyhow = "1.0.104"
+sha2 = "0.10.9"
 tauri-plugin-dialog = "2"
 
 

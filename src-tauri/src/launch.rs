@@ -1,6 +1,6 @@
 //! Reclaim's command line: Explorer's "Scan with Reclaim" menu, which the
-//! installers register as `reclaim.exe --scan "<folder>"`, and the elevated
-//! relaunch.
+//! installers register as `reclaim.exe --scan "<folder>"`, the elevated
+//! relaunch, and the elevated helper that removes protected leftovers.
 
 use std::sync::Mutex;
 
@@ -21,6 +21,12 @@ use windows::core::{BOOL, HSTRING};
 const SCAN: &str = "--scan";
 /// Passed by `relaunch_as_admin` with the process id of the copy it replaces.
 pub const RELAUNCHED_FROM: &str = "--relaunched-from";
+/// Starts the elevated helper instead of the app, with the file listing the
+/// leftovers it should remove.
+pub const REMOVE_LEFTOVERS: &str = "--remove-leftovers";
+/// The list file's hash. It comes on the command line because nothing can
+/// change that once the UAC prompt is up, unlike the file itself.
+pub const LIST_SHA256: &str = "--sha256";
 
 fn command_line() -> impl Iterator<Item = String> {
     std::env::args_os().map(|arg| arg.to_string_lossy().into_owned())
@@ -69,6 +75,17 @@ pub fn on_second_instance(app: &AppHandle, args: Vec<String>, _cwd: String) {
         let _ = window.show();
         let _ = window.set_focus();
     }
+}
+
+/// Removes the listed leftovers when this copy was started as the elevated
+/// helper. Returns true if it was, and the process should exit without
+/// opening a window or touching the running copy.
+pub fn run_leftover_helper() -> bool {
+    let Some(list) = value_of(REMOVE_LEFTOVERS, command_line()) else { return false };
+    if let Some(sha256) = value_of(LIST_SHA256, command_line()) {
+        crate::programs::leftovers::remove_listed(std::path::Path::new(&list), &sha256);
+    }
+    true
 }
 
 /// `relaunch_as_admin` starts the elevated copy before closing itself. If the

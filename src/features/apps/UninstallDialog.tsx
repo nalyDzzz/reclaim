@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { CircleCheck, FileText, Folder, KeyRound, ListTree, TriangleAlert } from "lucide-react";
-import { api, errorMessage, type Leftover, type Program, type RemovalResult } from "../../lib/api";
+import { api, errorMessage, type Leftover, type Program } from "../../lib/api";
 import { formatBytes, plural } from "../../lib/format";
 import { useApp } from "../../state/app";
 import { Dialog } from "../../components/Dialog";
@@ -15,8 +15,10 @@ type Step =
   | { kind: "scanning" }
   | { kind: "review"; leftovers: Leftover[] }
   | { kind: "removing" }
-  | { kind: "done"; results: RemovalResult[]; recycledBytes: number }
+  | { kind: "done"; removed: number; failures: Failure[]; recycledBytes: number }
   | { kind: "error"; message: string };
+
+type Failure = { item: Leftover; error: string };
 
 const MSI_USER_CANCELLED = 1602;
 const WAIT_FOR_HANDOFF_MS = 90_000;
@@ -31,7 +33,7 @@ export function UninstallDialog({
   /** `changed` is true when the program list should be reloaded. */
   onClose: (changed: boolean) => void;
 }) {
-  const { addReclaimed, toast } = useApp();
+  const { addReclaimed, toast, system } = useApp();
   const [step, setStep] = useState<Step>({ kind: "confirm" });
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const changed = useRef(false);
@@ -96,19 +98,28 @@ export function UninstallDialog({
     }
   };
 
-  const removeSelected = async (leftovers: Leftover[]) => {
-    const items = leftovers.filter((_, i) => selected.has(i));
+  /** `before` carries totals from earlier attempts when retrying failures. */
+  const removeItems = async (items: Leftover[], before = { removed: 0, recycledBytes: 0 }) => {
     setStep({ kind: "removing" });
     try {
       const results = await api.removeLeftovers(items);
       changed.current = true;
+      const failures = items.flatMap((item, i) => (results[i]?.ok ? [] : [{ item, error: results[i]?.error ?? "Unknown error" }]));
       const recycledBytes = items
         .filter((item, i) => results[i]?.ok && (item.kind === "folder" || item.kind === "file"))
-        .reduce((sum, item) => sum + item.sizeBytes, 0);
-      setStep({ kind: "done", results, recycledBytes });
+        .reduce((sum, item) => sum + item.sizeBytes, before.recycledBytes);
+      setStep({ kind: "done", removed: before.removed + items.length - failures.length, failures, recycledBytes });
     } catch (e) {
       setStep({ kind: "error", message: errorMessage(e) });
     }
+  };
+
+  const retryFailures = () => {
+    if (step.kind !== "done") return;
+    removeItems(
+      step.failures.map((f) => f.item),
+      { removed: step.removed, recycledBytes: step.recycledBytes },
+    );
   };
 
   const close = () => onClose(changed.current);
@@ -129,7 +140,7 @@ export function UninstallDialog({
         selected={selected}
         setSelected={setSelected}
         onSkip={close}
-        onRemove={() => removeSelected(step.leftovers)}
+        onRemove={() => removeItems(step.leftovers.filter((_, i) => selected.has(i)))}
       />
     );
   }
@@ -138,7 +149,7 @@ export function UninstallDialog({
     <Dialog
       title={title}
       onClose={busy ? undefined : close}
-      footer={<Footer step={step} onClose={close} onUninstall={runUninstaller} onScan={scanLeftovers} />}
+      footer={<Footer step={step} onClose={close} onUninstall={runUninstaller} onScan={scanLeftovers} onRetry={retryFailures} />}
     >
       {step.kind === "confirm" && (
         <div className="flex flex-col gap-3">
@@ -167,7 +178,13 @@ export function UninstallDialog({
         <Progress label="Looking for leftovers" detail="Checking program folders, app data, shortcuts, and the registry." />
       )}
       {step.kind === "removing" && (
-        <Progress label="Removing leftovers" detail="Files go to the Recycle Bin. Registry entries are backed up before they're removed." />
+        <Progress
+          label="Removing leftovers"
+          detail={
+            "Files go to the Recycle Bin. Registry entries are backed up before they're removed." +
+            (system?.elevated ? "" : " If Windows asks for permission, approve it so Reclaim can clear protected folders like Program Files.")
+          }
+        />
       )}
       {step.kind === "stillInstalled" && (
         <div className="flex gap-3">
@@ -195,11 +212,13 @@ function Footer({
   onClose,
   onUninstall,
   onScan,
+  onRetry,
 }: {
   step: Step;
   onClose: () => void;
   onUninstall: () => void;
   onScan: () => void;
+  onRetry: () => void;
 }) {
   switch (step.kind) {
     case "confirm":
@@ -231,9 +250,13 @@ function Footer({
     case "done":
     case "error":
       return (
-        <Button variant="primary" onClick={onClose} data-autofocus>
-          Done
-        </Button>
+        <>
+          {/* The app is gone from the list now, so this is the last chance to clear what's left. */}
+          {step.kind === "done" && step.failures.length > 0 && <Button onClick={onRetry}>Try again</Button>}
+          <Button variant="primary" onClick={onClose} data-autofocus>
+            Done
+          </Button>
+        </>
       );
     default:
       return null;
@@ -253,41 +276,52 @@ function Progress({ label, detail }: { label: string; detail: string }) {
 }
 
 function DoneSummary({ step, onEmptyBin }: { step: Extract<Step, { kind: "done" }>; onEmptyBin: () => void }) {
-  const failed = step.results.filter((r) => !r.ok);
-  const removed = step.results.length - failed.length;
+  const { removed, failures } = step;
   return (
     <div className="flex flex-col gap-3">
-      <div className="flex items-start gap-3">
-        <CircleCheck className="mt-0.5 size-4 shrink-0 text-good" />
-        <div>
-          <div className="font-medium text-ink">Removed {plural(removed, "leftover")}</div>
-          <div className="mt-1">
-            Registry entries were backed up as .reg files before removal.
-            {step.recycledBytes > 0 && (
-              <>
-                {" "}
-                Files went to the Recycle Bin, so their <span className="num text-ink-2">{formatBytes(step.recycledBytes)}</span> is freed once
-                you{" "}
-                <button className="text-uv-300 hover:underline" onClick={onEmptyBin}>
-                  empty it
-                </button>
-                .
-              </>
-            )}
+      {removed > 0 ? (
+        <div className="flex items-start gap-3">
+          <CircleCheck className="mt-0.5 size-4 shrink-0 text-good" />
+          <div>
+            <div className="font-medium text-ink">Removed {plural(removed, "leftover")}</div>
+            <div className="mt-1">
+              Registry entries were backed up as .reg files before removal.
+              {step.recycledBytes > 0 && (
+                <>
+                  {" "}
+                  Files went to the Recycle Bin, so their <span className="num text-ink-2">{formatBytes(step.recycledBytes)}</span> is freed once
+                  you{" "}
+                  <button className="text-uv-300 hover:underline" onClick={onEmptyBin}>
+                    empty it
+                  </button>
+                  .
+                </>
+              )}
+            </div>
           </div>
         </div>
-      </div>
-      {failed.length > 0 && (
+      ) : (
+        <div className="flex items-start gap-3">
+          <TriangleAlert className="mt-0.5 size-4 shrink-0 text-warn" />
+          <div className="font-medium text-ink">Nothing was removed</div>
+        </div>
+      )}
+      {failures.length > 0 && (
         <div className="rounded-lg border border-line bg-backdrop/50 p-3">
           <div className="mb-2 flex items-center gap-2 font-medium text-ink">
             <TriangleAlert className="size-3.5 text-warn" />
-            {plural(failed.length, "item")} couldn't be removed
+            {plural(failures.length, "item")} couldn't be removed
           </div>
           <ul className="flex flex-col gap-1.5">
-            {failed.map((r) => (
-              <li key={r.path + (r.valueName ?? "")} className="text-[12px]">
-                <div className="num truncate text-ink-2">{r.valueName ? `${r.path} → ${r.valueName}` : r.path}</div>
-                <div className="text-ink-3">{r.error}</div>
+            {failures.map(({ item, error }) => (
+              <li key={item.path + (item.valueName ?? "")} className="text-[12px]">
+                <div className="flex gap-3">
+                  <span className="num min-w-0 flex-1 truncate text-ink-2" title={item.path}>
+                    {item.valueName ? `${item.path} → ${item.valueName}` : item.path}
+                  </span>
+                  {item.sizeBytes > 0 && <span className="num shrink-0 text-ink-2">{formatBytes(item.sizeBytes)}</span>}
+                </div>
+                <div className="text-ink-3">{error}</div>
               </li>
             ))}
           </ul>

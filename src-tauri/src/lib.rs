@@ -12,6 +12,9 @@ use tauri::window::{Effect, EffectsBuilder};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    if launch::run_leftover_helper() {
+        return;
+    }
     launch::wait_for_replaced_instance();
     tauri::Builder::default()
         // First, so a second copy hands off before the others start up.

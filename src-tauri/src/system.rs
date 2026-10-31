@@ -1,10 +1,10 @@
 use serde::Serialize;
 use tauri::{AppHandle, Manager};
-use windows::Win32::Foundation::{CloseHandle, HANDLE};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_FAILED};
 use windows::Win32::Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation};
 use windows::Win32::Storage::FileSystem::{GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW};
-use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
-use windows::Win32::UI::Shell::{SHELLEXECUTEINFOW, ShellExecuteExW};
+use windows::Win32::System::Threading::{GetCurrentProcess, GetExitCodeProcess, INFINITE, OpenProcessToken, WaitForSingleObject};
+use windows::Win32::UI::Shell::{SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW};
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 use windows::core::{HSTRING, PCWSTR};
 use winreg::RegKey;
@@ -91,6 +91,38 @@ pub fn system_info(app: AppHandle) -> SystemInfo {
         app_version: app.package_info().version.to_string(),
         install_kind: install_kind(),
         user_profile: crate::paths::known().user_profile.to_string_lossy().to_string(),
+    }
+}
+
+/// Starts `file` and waits for it to exit, returning its exit code when
+/// Windows reports one. Uses ShellExecuteEx (not CreateProcess) so programs
+/// that need elevation, or are started with the `runas` verb, get a normal
+/// UAC prompt. A declined prompt fails with `ERROR_CANCELLED`.
+pub fn shell_execute_and_wait(verb: Option<&str>, file: &str, params: &str) -> windows::core::Result<Option<u32>> {
+    let h_verb = verb.map(HSTRING::from);
+    let h_file = HSTRING::from(file);
+    let h_params = HSTRING::from(params);
+    let dir = std::path::Path::new(file).parent().map(|p| HSTRING::from(p.as_os_str())).unwrap_or_default();
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC,
+        lpVerb: h_verb.as_ref().map_or(PCWSTR::null(), |v| PCWSTR(v.as_ptr())),
+        lpFile: PCWSTR(h_file.as_ptr()),
+        lpParameters: if params.is_empty() { PCWSTR::null() } else { PCWSTR(h_params.as_ptr()) },
+        lpDirectory: if dir.is_empty() { PCWSTR::null() } else { PCWSTR(dir.as_ptr()) },
+        nShow: SW_SHOWNORMAL.0,
+        ..Default::default()
+    };
+    unsafe { ShellExecuteExW(&mut info) }?;
+    if info.hProcess.is_invalid() {
+        return Ok(None);
+    }
+    let mut code = 0u32;
+    unsafe {
+        let waited = WaitForSingleObject(info.hProcess, INFINITE);
+        let got_code = waited != WAIT_FAILED && GetExitCodeProcess(info.hProcess, &mut code).is_ok();
+        let _ = CloseHandle(info.hProcess);
+        Ok(got_code.then_some(code))
     }
 }
 

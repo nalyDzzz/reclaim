@@ -13,12 +13,14 @@ use anyhow::Context;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
-use winreg::RegKey;
+use windows::Win32::Foundation::ERROR_CANCELLED;
 use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_ALL_ACCESS, KEY_READ, KEY_WOW64_64KEY};
+use winreg::{HKEY, RegKey};
 
 use super::open_entry;
 use crate::error::CmdResult;
 use crate::paths::{self, known, normalize};
+use crate::system::{is_elevated, shell_execute_and_wait};
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
@@ -69,7 +71,7 @@ fn is_version_token(t: &str) -> bool {
     t.contains('.') && t.chars().all(|c| c.is_ascii_digit() || c == '.')
 }
 
-const NOISE_TOKENS: &[&str] = &["x64", "x86", "64-bit", "32-bit", "64bit", "32bit", "amd64", "arm64", "win64", "win32"];
+const NOISE_TOKENS: &[&str] = &["x64", "x86", "64-bit", "32-bit", "64bit", "32bit", "amd64", "arm64", "win64", "win32", "version"];
 const LEGAL_SUFFIXES: &[&str] = &[
     "inc",
     "llc",
@@ -205,11 +207,26 @@ fn scan_filesystem(q: &LeftoverQuery, names: &NameVariants, out: &mut Collector)
         }
     }
 
-    let program_roots = [&k.program_files, &k.program_files_x86, &k.local_programs];
-    let data_roots = [&k.program_data, &k.app_data, &k.local_app_data, &k.user_profile.join(r"AppData\LocalLow")];
-    let roots = program_roots.iter().map(|r| (r.to_path_buf(), true)).chain(data_roots.iter().map(|r| (r.to_path_buf(), false)));
+    const PROGRAM: &str = "Program folder named after the app";
+    const DATA: &str = "App data folder named after the app";
+    const SHARED: &str = "Shared files folder named after the app";
+    let roots = [
+        (k.program_files.clone(), Confidence::High, PROGRAM),
+        (k.program_files_x86.clone(), Confidence::High, PROGRAM),
+        (k.local_programs.clone(), Confidence::High, PROGRAM),
+        (k.program_files.join("Common Files"), Confidence::Medium, SHARED),
+        (k.program_files_x86.join("Common Files"), Confidence::Medium, SHARED),
+        (k.program_data.clone(), Confidence::Medium, DATA),
+        (k.app_data.clone(), Confidence::Medium, DATA),
+        (k.local_app_data.clone(), Confidence::Medium, DATA),
+        (k.user_profile.join(r"AppData\LocalLow"), Confidence::Medium, DATA),
+        (k.temp.clone(), Confidence::Medium, "Temporary files folder named after the app"),
+        // Apps often keep projects and saves here, so these are never pre-selected.
+        (k.documents.clone(), Confidence::Low, "Folder in Documents named after the app. It may hold your own files"),
+        (k.saved_games.clone(), Confidence::Low, "Saved games folder named after the app"),
+    ];
 
-    for (root, is_program_root) in roots {
+    for (root, confidence, reason) in roots {
         let Ok(entries) = std::fs::read_dir(&root) else { continue };
         for entry in entries.flatten() {
             if !entry.file_type().is_ok_and(|t| t.is_dir()) {
@@ -217,19 +234,31 @@ fn scan_filesystem(q: &LeftoverQuery, names: &NameVariants, out: &mut Collector)
             }
             let name = entry.file_name().to_string_lossy().to_string();
             if names.matches_name(&name) {
-                let confidence = if is_program_root { Confidence::High } else { Confidence::Medium };
-                let reason = if is_program_root { "Program folder named after the app" } else { "App data folder named after the app" };
                 out.push_path(&entry.path(), confidence, reason);
             } else if names.matches_publisher(&name) {
-                scan_publisher_folder(&entry.path(), names, out);
+                scan_publisher_folder(&entry.path(), names, confidence.min(Confidence::Medium), out);
             }
         }
     }
 
-    // Start menu and desktop shortcuts.
+    // Developer and command-line tools keep settings and downloads (Ollama's
+    // models, for one) in dot-folders in the profile. Only dot-folders: the
+    // profile's other folders belong to the person.
+    if let Ok(entries) = std::fs::read_dir(&k.user_profile) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') && entry.file_type().is_ok_and(|t| t.is_dir()) && names.matches_name(&name) {
+                out.push_path(&entry.path(), Confidence::Medium, "Settings folder in your user folder");
+            }
+        }
+    }
+
+    // Start menu, startup, and desktop shortcuts.
     let shortcut_dirs = [
         k.start_menu_user.clone(),
         k.start_menu_common.clone(),
+        k.start_menu_user.join("Startup"),
+        k.start_menu_common.join("Startup"),
         k.user_profile.join("Desktop"),
         std::env::var_os("PUBLIC").map(|p| PathBuf::from(p).join("Desktop")).unwrap_or_default(),
     ];
@@ -254,7 +283,9 @@ fn scan_filesystem(q: &LeftoverQuery, names: &NameVariants, out: &mut Collector)
     }
 }
 
-fn scan_publisher_folder(folder: &Path, names: &NameVariants, out: &mut Collector) {
+/// Looks inside a folder named after the publisher. `confidence` is the most
+/// a match here can get; partial name matches always get Low.
+fn scan_publisher_folder(folder: &Path, names: &NameVariants, confidence: Confidence, out: &mut Collector) {
     let Ok(entries) = std::fs::read_dir(folder) else { return };
     let mut total = 0;
     let mut matched = Vec::new();
@@ -262,18 +293,18 @@ fn scan_publisher_folder(folder: &Path, names: &NameVariants, out: &mut Collecto
         total += 1;
         let name = entry.file_name().to_string_lossy().to_string();
         if names.matches_name(&name) {
-            matched.push((entry.path(), Confidence::Medium));
+            matched.push((entry.path(), true));
         } else if names.matches_first_word(&name) {
-            matched.push((entry.path(), Confidence::Low));
+            matched.push((entry.path(), false));
         }
     }
     if total == 0 {
-        out.push_path(folder, Confidence::Medium, "Empty publisher folder");
-    } else if !matched.is_empty() && matched.len() == total && matched.iter().all(|(_, c)| *c == Confidence::Medium) {
-        out.push_path(folder, Confidence::Medium, "Publisher folder that only holds this app");
+        out.push_path(folder, confidence, "Empty publisher folder");
+    } else if !matched.is_empty() && matched.len() == total && matched.iter().all(|(_, exact)| *exact) {
+        out.push_path(folder, confidence, "Publisher folder that only holds this app");
     } else {
-        for (path, confidence) in matched {
-            out.push_path(&path, confidence, "Folder inside the publisher's folder");
+        for (path, exact) in matched {
+            out.push_path(&path, if exact { confidence } else { Confidence::Low }, "Folder inside the publisher's folder");
         }
     }
 }
@@ -343,17 +374,17 @@ fn scan_registry(q: &LeftoverQuery, names: &NameVariants, out: &mut Collector) {
         }
     }
 
-    // Startup entries and App Paths registrations that point into the app's folder.
+    // Startup entries, App Paths registrations, and Windows' own records that
+    // point into the app's folder. A protected folder like Program Files
+    // itself would match every app, so it never counts.
     let locations: Vec<String> = [&q.install_location, &q.inferred_location]
         .into_iter()
         .flatten()
-        .map(|l| normalize(Path::new(l.trim_matches('"'))))
-        .filter(|l| l.len() > 3)
+        .map(|l| PathBuf::from(l.trim_matches('"')))
+        .filter(|l| !paths::is_protected(l))
+        .map(|l| normalize(&l))
         .collect();
-    let points_inside = |data: &str| {
-        let d = data.to_lowercase().replace('/', "\\");
-        locations.iter().any(|l| d.contains(l.as_str()))
-    };
+    let points_inside = |data: &str| mentions_path_inside(data, &locations);
     let run_keys = [
         ("HKCU", RegKey::predef(HKEY_CURRENT_USER), r"Software\Microsoft\Windows\CurrentVersion\Run"),
         ("HKLM", RegKey::predef(HKEY_LOCAL_MACHINE), r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run"),
@@ -384,6 +415,41 @@ fn scan_registry(q: &LeftoverQuery, names: &NameVariants, out: &mut Collector) {
             }
         }
     }
+    for (label, hive, path) in PER_PROGRAM_TRACE_KEYS {
+        let Ok(key) = RegKey::predef(*hive).open_subkey_with_flags(path, KEY_READ | KEY_WOW64_64KEY) else { continue };
+        for (value_name, _) in key.enum_values().flatten() {
+            if points_inside(&value_name) {
+                out.push(
+                    LeftoverKind::RegistryValue,
+                    format!(r"{label}\{path}"),
+                    Some(value_name),
+                    Confidence::High,
+                    "Windows' record of the app",
+                );
+            }
+        }
+    }
+}
+
+/// Keys where Windows records facts about each program it has run, one value
+/// per program, named by the program's full path.
+const PER_PROGRAM_TRACE_KEYS: &[(&str, HKEY, &str)] = &[
+    ("HKCU", HKEY_CURRENT_USER, r"Software\Classes\Local Settings\Software\Microsoft\Windows\Shell\MuiCache"),
+    ("HKCU", HKEY_CURRENT_USER, r"Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Compatibility Assistant\Store"),
+    ("HKCU", HKEY_CURRENT_USER, r"Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers"),
+    ("HKLM", HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers"),
+];
+
+/// Whether `text` (a command line or path) mentions a path inside one of the
+/// normalized `folders`. The folder name has to end there, so a mention of
+/// `C:\Apps\Foobar` isn't inside `C:\Apps\Foo`.
+fn mentions_path_inside(text: &str, folders: &[String]) -> bool {
+    let text = text.to_lowercase().replace('/', "\\");
+    folders.iter().any(|folder| {
+        text.match_indices(folder.as_str()).any(|(at, _)| {
+            text[at + folder.len()..].chars().next().is_none_or(|c| matches!(c, '\\' | '"' | '\'' | ',' | ';') || c.is_whitespace())
+        })
+    })
 }
 
 #[tauri::command]
@@ -482,9 +548,13 @@ pub fn is_protected_reg_key(sub: &str) -> bool {
     false
 }
 
-fn is_run_key(sub: &str) -> bool {
+/// Protected keys whose values each describe one program. Single values may
+/// be removed from these, but never the key itself.
+fn is_per_program_value_key(sub: &str) -> bool {
     let p = reg_parts(sub).join("\\");
-    p == r"software\microsoft\windows\currentversion\run" || p == r"software\wow6432node\microsoft\windows\currentversion\run"
+    p == r"software\microsoft\windows\currentversion\run"
+        || p == r"software\wow6432node\microsoft\windows\currentversion\run"
+        || PER_PROGRAM_TRACE_KEYS.iter().any(|(_, _, key)| p == key.to_lowercase())
 }
 
 fn split_reg_path(path: &str) -> anyhow::Result<(&'static str, RegKey, String)> {
@@ -511,13 +581,32 @@ fn backup_key(backup_dir: &Path, label: &str, sub: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn remove_one(item: &Leftover, backup_dir: &Path) -> anyhow::Result<()> {
+/// Windows refused a removal that an elevated copy of Reclaim may be allowed
+/// to make.
+#[derive(Debug)]
+struct Denied(&'static str);
+
+impl std::fmt::Display for Denied {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl std::error::Error for Denied {}
+
+/// The shell reports every failure the same way, so this can't say which.
+const RECYCLE_FAILED: &str =
+    "Windows couldn't move this to the Recycle Bin. A program may be using it, or it may be too large for the Recycle Bin.";
+
+/// Removes one leftover. Registry entries are exported to `backup_dir` first;
+/// `None` means the caller already did that.
+fn remove_one(item: &Leftover, backup_dir: Option<&Path>) -> anyhow::Result<()> {
     match item.kind {
         LeftoverKind::Folder | LeftoverKind::File => {
             let path = Path::new(&item.path);
             crate::error::ensure!(!paths::is_protected(path), "This location is protected");
             if path.exists() {
-                trash::delete(path).map_err(|e| anyhow::anyhow!("{e}"))?;
+                trash::delete(path).map_err(|_| Denied(RECYCLE_FAILED))?;
             }
         }
         LeftoverKind::RegistryKey => {
@@ -526,19 +615,23 @@ fn remove_one(item: &Leftover, backup_dir: &Path) -> anyhow::Result<()> {
             if hive.open_subkey_with_flags(&sub, KEY_READ | KEY_WOW64_64KEY).is_err() {
                 return Ok(()); // already gone
             }
-            backup_key(backup_dir, label, &sub)?;
+            if let Some(dir) = backup_dir {
+                backup_key(dir, label, &sub)?;
+            }
             let (parent, leaf) = sub.rsplit_once('\\').context("Invalid registry path")?;
-            let parent_key = hive.open_subkey_with_flags(parent, KEY_ALL_ACCESS | KEY_WOW64_64KEY).map_err(|e| access_error(e, label))?;
-            parent_key.delete_subkey_all(leaf).map_err(|e| access_error(e, label))?;
+            let parent_key = hive.open_subkey_with_flags(parent, KEY_ALL_ACCESS | KEY_WOW64_64KEY).map_err(access_error)?;
+            parent_key.delete_subkey_all(leaf).map_err(access_error)?;
         }
         LeftoverKind::RegistryValue => {
             let (label, hive, sub) = split_reg_path(&item.path)?;
-            crate::error::ensure!(is_run_key(&sub) || !is_protected_reg_key(&sub), "This registry key is protected");
+            crate::error::ensure!(is_per_program_value_key(&sub) || !is_protected_reg_key(&sub), "This registry key is protected");
             let value = item.value_name.as_deref().context("Missing value name")?;
-            backup_key(backup_dir, label, &sub)?;
-            let key = hive.open_subkey_with_flags(&sub, KEY_ALL_ACCESS | KEY_WOW64_64KEY).map_err(|e| access_error(e, label))?;
+            if let Some(dir) = backup_dir {
+                backup_key(dir, label, &sub)?;
+            }
+            let key = hive.open_subkey_with_flags(&sub, KEY_ALL_ACCESS | KEY_WOW64_64KEY).map_err(access_error)?;
             match key.delete_value(value) {
-                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(access_error(e, label)),
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(access_error(e)),
                 _ => {}
             }
         }
@@ -546,12 +639,117 @@ fn remove_one(item: &Leftover, backup_dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn access_error(e: std::io::Error, label: &str) -> anyhow::Error {
-    if e.kind() == std::io::ErrorKind::PermissionDenied && label == "HKLM" {
-        anyhow::anyhow!("Needs administrator rights. Restart Reclaim as administrator to remove this.")
-    } else {
-        anyhow::anyhow!("{e}")
+fn access_error(e: std::io::Error) -> anyhow::Error {
+    if e.kind() == std::io::ErrorKind::PermissionDenied { Denied("Windows denied access to this registry entry.").into() } else { e.into() }
+}
+
+/// Whether `item` is in HKLM or outside every user profile, where removing it
+/// can take administrator rights. Only these go to the elevated copy: it may
+/// run as another account, whose HKCU and profile weren't the ones scanned.
+fn is_machine_wide(item: &Leftover) -> bool {
+    match item.kind {
+        LeftoverKind::Folder | LeftoverKind::File => {
+            let profile = &known().user_profile;
+            let profiles = profile.parent().filter(|p| p.parent().is_some()).unwrap_or(profile);
+            !paths::is_under(&normalize(&paths::long_path(Path::new(&item.path))), &normalize(profiles))
+        }
+        LeftoverKind::RegistryKey | LeftoverKind::RegistryValue => split_reg_path(&item.path).is_ok_and(|(label, ..)| label == "HKLM"),
     }
+}
+
+fn still_present(item: &Leftover) -> bool {
+    use std::io::ErrorKind::NotFound;
+    match item.kind {
+        LeftoverKind::Folder | LeftoverKind::File => std::fs::symlink_metadata(&item.path).is_ok(),
+        LeftoverKind::RegistryKey | LeftoverKind::RegistryValue => {
+            let Ok((_, hive, sub)) = split_reg_path(&item.path) else { return true };
+            let key = match hive.open_subkey_with_flags(&sub, KEY_READ | KEY_WOW64_64KEY) {
+                Ok(key) => key,
+                Err(e) => return e.kind() != NotFound,
+            };
+            match (item.kind, &item.value_name) {
+                (LeftoverKind::RegistryValue, Some(value)) => key.get_raw_value(value).map_or_else(|e| e.kind() != NotFound, |_| true),
+                _ => true,
+            }
+        }
+    }
+}
+
+/// Removes `items` in an elevated copy of Reclaim, which shows a UAC prompt,
+/// the same way an uninstaller gets its rights. The copy reports nothing
+/// back, so callers check afterwards what's gone.
+fn remove_elevated(items: &[&Leftover]) -> anyhow::Result<()> {
+    use crate::launch::{LIST_SHA256, REMOVE_LEFTOVERS};
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let list = std::env::temp_dir().join(format!("reclaim-leftovers-{}-{nanos}.json", std::process::id()));
+    let data = serde_json::to_vec(items)?;
+    std::fs::write(&list, &data)?;
+    let exe = std::env::current_exe()?;
+    let params = format!(r#"{REMOVE_LEFTOVERS} "{}" {LIST_SHA256} {}"#, list.display(), sha256_hex(&data));
+    let launched = shell_execute_and_wait(Some("runas"), &exe.to_string_lossy(), &params);
+    let _ = std::fs::remove_file(&list);
+    match launched {
+        Err(err) if err.code() == ERROR_CANCELLED.to_hresult() => {
+            anyhow::bail!("Needs administrator approval, and the prompt was declined.")
+        }
+        Err(err) => anyhow::bail!("Couldn't start Reclaim as administrator: {}", err.message()),
+        Ok(_) => Ok(()),
+    }
+}
+
+fn sha256_hex(data: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(data).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Reads the list `remove_elevated` wrote. It sits in the user's temp folder,
+/// where anything running as them could rewrite it while the UAC prompt is
+/// up, so it's only trusted if it matches the hash from the command line.
+/// Parses the same bytes it hashed, so there's no second read to swap.
+fn read_list(list: &Path, sha256: &str) -> Option<Vec<Leftover>> {
+    let data = std::fs::read(list).ok()?;
+    if !sha256_hex(&data).eq_ignore_ascii_case(sha256) {
+        return None;
+    }
+    serde_json::from_slice(&data).ok()
+}
+
+/// What the elevated copy started by `remove_elevated` runs. It only takes
+/// machine-wide items, and the usual protections still apply to each one.
+pub fn remove_listed(list: &Path, sha256: &str) {
+    let Some(items) = read_list(list, sha256) else { return };
+    for item in items.iter().filter(|item| is_machine_wide(item)) {
+        // The copy that asked already backed up these registry entries: it
+        // only asks after a backup succeeded and the removal was denied.
+        let _ = remove_one(item, None);
+    }
+}
+
+/// Removes each item, then retries the machine-wide ones Windows refused in
+/// an elevated copy, so one UAC prompt covers Program Files and HKLM.
+fn remove_all(items: &[Leftover], backup_dir: &Path) -> Vec<anyhow::Result<()>> {
+    let mut outcomes: Vec<_> = items.iter().map(|item| remove_one(item, Some(backup_dir))).collect();
+    if is_elevated() {
+        return outcomes;
+    }
+    let retry: Vec<usize> =
+        (0..items.len()).filter(|&i| outcomes[i].as_ref().is_err_and(|e| e.is::<Denied>()) && is_machine_wide(&items[i])).collect();
+    if retry.is_empty() {
+        return outcomes;
+    }
+    let elevated = remove_elevated(&retry.iter().map(|&i| &items[i]).collect::<Vec<_>>());
+    for i in retry {
+        let item = &items[i];
+        outcomes[i] = match &elevated {
+            Err(e) => Err(anyhow::anyhow!("{e}")),
+            Ok(()) if !still_present(item) => Ok(()),
+            Ok(()) if matches!(item.kind, LeftoverKind::Folder | LeftoverKind::File) => Err(anyhow::anyhow!(
+                "Still there after trying as administrator. A program may be using it, or it may be too large for the Recycle Bin."
+            )),
+            Ok(()) => Err(anyhow::anyhow!("Still there after trying as administrator. Windows may protect this entry.")),
+        };
+    }
+    outcomes
 }
 
 /// Moves files to the Recycle Bin and deletes registry entries after
@@ -560,16 +758,15 @@ fn access_error(e: std::io::Error, label: &str) -> anyhow::Error {
 pub async fn remove_leftovers(app: AppHandle, items: Vec<Leftover>) -> CmdResult<Vec<RemovalResult>> {
     let backup_dir = app.path().app_local_data_dir()?.join("registry-backups");
     let results = tauri::async_runtime::spawn_blocking(move || {
+        let outcomes = remove_all(&items, &backup_dir);
         items
             .iter()
-            .map(|item| {
-                let result = remove_one(item, &backup_dir);
-                RemovalResult {
-                    path: item.path.clone(),
-                    value_name: item.value_name.clone(),
-                    ok: result.is_ok(),
-                    error: result.err().map(|e| format!("{e:#}")),
-                }
+            .zip(outcomes)
+            .map(|(item, result)| RemovalResult {
+                path: item.path.clone(),
+                value_name: item.value_name.clone(),
+                ok: result.is_ok(),
+                error: result.err().map(|e| format!("{e:#}")),
             })
             .collect::<Vec<_>>()
     })
@@ -602,6 +799,87 @@ mod tests {
 
         let b = NameVariants::new("Brave", Some("Brave Software Inc"));
         assert!(b.matches_publisher("BraveSoftware"));
+
+        let o = NameVariants::new("Ollama version 0.12.3", Some("Ollama"));
+        assert!(o.matches_name(".ollama"));
+        assert!(!o.matches_name("Version"));
+    }
+
+    #[test]
+    fn path_mentions_stop_at_folder_boundaries() {
+        let folders = vec![normalize(Path::new(r"C:\Program Files\NTLite"))];
+        assert!(mentions_path_inside(r"C:\Program Files\NTLite\unins000.exe.FriendlyAppName", &folders));
+        assert!(mentions_path_inside(r#""C:\Program Files\NTLite\NTLite.exe" /tray"#, &folders));
+        assert!(mentions_path_inside(r"c:/program files/ntlite", &folders));
+        assert!(!mentions_path_inside(r"C:\Program Files\NTLite2\NTLite.exe", &folders));
+        assert!(!mentions_path_inside(r"C:\Users\me\Downloads\NTLite_setup_x64.exe", &folders));
+    }
+
+    fn leftover(kind: LeftoverKind, path: &Path) -> Leftover {
+        Leftover {
+            kind,
+            path: path.to_string_lossy().into(),
+            value_name: None,
+            size_bytes: 0,
+            confidence: Confidence::High,
+            reason: String::new(),
+        }
+    }
+
+    #[test]
+    fn only_machine_wide_items_need_elevation() {
+        let k = known();
+        assert!(is_machine_wide(&leftover(LeftoverKind::Folder, &k.program_files.join("NTLite"))));
+        assert!(is_machine_wide(&leftover(LeftoverKind::Folder, &k.program_data.join("NTLite"))));
+        assert!(!is_machine_wide(&leftover(LeftoverKind::Folder, &k.local_app_data.join("NTLite"))));
+        assert!(!is_machine_wide(&leftover(LeftoverKind::Folder, &k.user_profile.join(".ollama"))));
+        assert!(is_machine_wide(&leftover(LeftoverKind::RegistryKey, Path::new(r"HKLM\SOFTWARE\NTLite"))));
+        assert!(!is_machine_wide(&leftover(LeftoverKind::RegistryKey, Path::new(r"HKCU\Software\NTLite"))));
+    }
+
+    #[test]
+    fn elevated_helper_only_trusts_the_list_it_was_given() {
+        let list = std::env::temp_dir().join(format!("reclaim-list-test-{}.json", std::process::id()));
+        let data = serde_json::to_vec(&[leftover(LeftoverKind::Folder, &known().program_files.join("NTLite"))]).unwrap();
+        let sha256 = sha256_hex(&data);
+        std::fs::write(&list, &data).unwrap();
+        let original = read_list(&list, &sha256).map(|items| items.len());
+        let swapped = serde_json::to_vec(&[leftover(LeftoverKind::Folder, &known().program_files.join("Antivirus"))]).unwrap();
+        std::fs::write(&list, swapped).unwrap();
+        let tampered = read_list(&list, &sha256).map(|items| items.len());
+        let _ = std::fs::remove_file(&list);
+        assert_eq!(original, Some(1));
+        assert_eq!(tampered, None, "a list rewritten after launch must be ignored");
+    }
+
+    #[test]
+    fn elevated_helper_ignores_items_in_profiles() {
+        let dir = std::env::temp_dir().join(format!("reclaim-helper-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let list = dir.with_extension("json");
+        let data = serde_json::to_vec(&[leftover(LeftoverKind::Folder, &dir)]).unwrap();
+        std::fs::write(&list, &data).unwrap();
+        remove_listed(&list, &sha256_hex(&data));
+        let survived = dir.exists();
+        let _ = std::fs::remove_file(&list);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(survived, "the elevated helper must only remove machine-wide items");
+    }
+
+    #[test]
+    fn refused_removal_can_be_retried_elevated() {
+        use std::process::Command;
+        let dir = std::env::temp_dir().join(format!("reclaim-denied-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("file.bin"), b"x").unwrap();
+        let user = std::env::var("USERNAME").unwrap();
+        let acl = |args: &[&str]| Command::new("icacls").arg(&dir).args(args).output().unwrap().status.success();
+        assert!(acl(&["/deny", &format!("{user}:(OI)(CI)(DE,DC)")]));
+        let result = remove_one(&leftover(LeftoverKind::Folder, &dir), None);
+        acl(&["/remove:d", &user, "/T"]);
+        let _ = std::fs::remove_dir_all(&dir);
+        let err = result.expect_err("removal should be refused");
+        assert!(err.is::<Denied>(), "{err:#}");
     }
 
     #[test]
@@ -615,6 +893,10 @@ mod tests {
         assert!(!is_protected_reg_key(r"Software\Termius"));
         assert!(!is_protected_reg_key(r"Software\Microsoft\OneDrive"));
         assert!(!is_protected_reg_key(r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Discord"));
-        assert!(is_run_key(r"Software\Microsoft\Windows\CurrentVersion\Run"));
+        assert!(is_per_program_value_key(r"Software\Microsoft\Windows\CurrentVersion\Run"));
+        let mui_cache = r"Software\Classes\Local Settings\Software\Microsoft\Windows\Shell\MuiCache";
+        assert!(is_per_program_value_key(mui_cache));
+        assert!(is_protected_reg_key(mui_cache), "values can go, but never the whole key");
+        assert!(!is_per_program_value_key(r"Software\Classes\Local Settings\Software\Microsoft\Windows\Shell"));
     }
 }

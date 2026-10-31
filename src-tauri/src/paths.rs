@@ -30,6 +30,9 @@ pub struct KnownDirs {
     pub temp: PathBuf,
     pub start_menu_user: PathBuf,
     pub start_menu_common: PathBuf,
+    /// Can be redirected, often into OneDrive, so it isn't always under the profile.
+    pub documents: PathBuf,
+    pub saved_games: PathBuf,
 }
 
 fn env_dir(name: &str, fallback: &str) -> PathBuf {
@@ -61,7 +64,9 @@ fn system_windows_dir() -> Option<PathBuf> {
 /// environment, because the protected-path rules depend on them and an
 /// elevated Reclaim must not trust variables a standard user can set.
 pub fn known() -> &'static KnownDirs {
-    use windows::Win32::UI::Shell::{FOLDERID_Profile, FOLDERID_ProgramData, FOLDERID_ProgramFiles, FOLDERID_ProgramFilesX86};
+    use windows::Win32::UI::Shell::{
+        FOLDERID_Documents, FOLDERID_Profile, FOLDERID_ProgramData, FOLDERID_ProgramFiles, FOLDERID_ProgramFilesX86, FOLDERID_SavedGames,
+    };
     static DIRS: OnceLock<KnownDirs> = OnceLock::new();
     DIRS.get_or_init(|| {
         let user_profile = known_folder(&FOLDERID_Profile).unwrap_or_else(|| env_dir("USERPROFILE", r"C:\Users\Default"));
@@ -76,6 +81,8 @@ pub fn known() -> &'static KnownDirs {
             local_programs: local_app_data.join("Programs"),
             start_menu_user: app_data.join(r"Microsoft\Windows\Start Menu\Programs"),
             start_menu_common: program_data.join(r"Microsoft\Windows\Start Menu\Programs"),
+            documents: known_folder(&FOLDERID_Documents).map(|p| long_path(&p)).unwrap_or_else(|| user_profile.join("Documents")),
+            saved_games: known_folder(&FOLDERID_SavedGames).map(|p| long_path(&p)).unwrap_or_else(|| user_profile.join("Saved Games")),
             program_data,
             user_profile,
             app_data,
@@ -164,7 +171,8 @@ pub fn normalize(path: &Path) -> String {
     s
 }
 
-fn is_under(path: &str, root: &str) -> bool {
+/// Whether normalized `path` is `root` or inside it.
+pub fn is_under(path: &str, root: &str) -> bool {
     path == root || (path.starts_with(root) && path.as_bytes().get(root.len()) == Some(&b'\\'))
 }
 
@@ -229,6 +237,8 @@ pub fn is_protected(path: &Path) -> bool {
         n(&up.join("Videos")),
         n(&up.join("OneDrive")),
         n(&up.join("Saved Games")),
+        n(&k.documents),
+        n(&k.saved_games),
         n(&k.start_menu_user),
         n(&k.start_menu_common),
         n(k.start_menu_user.parent().unwrap_or(&k.start_menu_user)),
@@ -384,6 +394,8 @@ mod tests {
         assert!(is_protected(&k.local_app_data));
         assert!(is_protected(&k.user_profile));
         assert!(is_protected(Path::new("relative\\path")));
+        assert!(is_protected(&k.documents));
+        assert!(is_protected(&k.saved_games));
         assert!(!is_protected(&k.program_files.join("SomeVendor")));
         assert!(!is_protected(&k.local_app_data.join("Discord")));
     }
