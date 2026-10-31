@@ -23,7 +23,7 @@ use windows::core::{BSTR, HSTRING, Interface, PCWSTR};
 use winreg::RegKey;
 use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_64KEY};
 
-use super::{CREATE_NO_WINDOW, Confidence, Leftover, LeftoverKind, Refused, backup_file, backup_key, points_into, write_utf16};
+use super::{CREATE_NO_WINDOW, Confidence, Leftover, LeftoverKind, Refused, backup_file, backup_key, points_into, reg_quote, write_utf16};
 use crate::paths::{self, expand_env};
 use crate::programs::split_command;
 
@@ -71,12 +71,9 @@ pub(super) fn backup(item: &Leftover, dir: &Path) -> anyhow::Result<()> {
         _ => {
             // Just the one rule: exporting the whole key would copy hundreds.
             let rule = read_rule(&item.path).context("The firewall rule is gone")?;
-            let escape = |s: &str| s.replace('\\', r"\\").replace('"', "\\\"");
-            let reg = format!(
-                "Windows Registry Editor Version 5.00\r\n\r\n[HKEY_LOCAL_MACHINE\\{FIREWALL_RULES}]\r\n\"{}\"=\"{}\"\r\n",
-                escape(&item.path),
-                escape(&rule)
-            );
+            let failed = "Couldn't back up the firewall rule before removing it";
+            let (id, rule) = (reg_quote(&item.path).context(failed)?, reg_quote(&rule).context(failed)?);
+            let reg = format!("Windows Registry Editor Version 5.00\r\n\r\n[HKEY_LOCAL_MACHINE\\{FIREWALL_RULES}]\r\n{id}={rule}\r\n");
             write_utf16(&backup_file(dir, "HKLM", &format!(r"{FIREWALL_RULES}\{}", item.path), "reg")?, &reg)?;
             Ok(())
         }

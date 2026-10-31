@@ -630,8 +630,9 @@ fn reg_data(value: &winreg::RegValue) -> String {
         String::from_utf16_lossy(&units).trim_end_matches('\0').to_string()
     };
     match value.vtype {
-        // A quoted string can't hold line breaks, so those keep their bytes.
-        winreg::enums::REG_SZ if !text().contains(['\r', '\n', '\0']) => format!("\"{}\"", reg_escape(&text())),
+        // Only plain text is written quoted. Anything with control characters
+        // keeps its bytes, since a line break would end the entry early.
+        winreg::enums::REG_SZ if !text().chars().any(char::is_control) => format!("\"{}\"", reg_escape(&text())),
         winreg::enums::REG_DWORD if value.bytes.len() == 4 => {
             format!("dword:{:08x}", u32::from_le_bytes([value.bytes[0], value.bytes[1], value.bytes[2], value.bytes[3]]))
         }
@@ -644,19 +645,37 @@ fn reg_escape(text: &str) -> String {
     text.replace('\\', r"\\").replace('"', "\\\"")
 }
 
+/// `text` quoted as a `.reg` file name or string. A `.reg` file has no way
+/// to write a line break there, and one would start a new entry when the
+/// backup is opened, which runs as administrator. So control characters
+/// fail the backup, and with it the removal.
+fn reg_quote(text: &str) -> anyhow::Result<String> {
+    crate::error::ensure!(!text.chars().any(char::is_control), "It holds characters a .reg backup can't hold safely");
+    Ok(format!("\"{}\"", reg_escape(text)))
+}
+
 /// Appends `key` and everything under it to `out` in regedit's format.
-fn export_key(key: &RegKey, path: &str, out: &mut String) {
+/// Anything it can't read fails the backup rather than leaving it partial.
+fn export_key(key: &RegKey, path: &str, out: &mut String) -> anyhow::Result<()> {
+    use std::io::ErrorKind::NotFound;
+    let unsafe_name = path.chars().any(|c| c.is_control() || c == '[' || c == ']');
+    crate::error::ensure!(!unsafe_name, "A key's name holds characters a .reg backup can't hold safely");
     out.push_str(&format!("[{path}]\r\n"));
-    for (name, value) in key.enum_values().flatten() {
-        let name = if name.is_empty() { "@".to_string() } else { format!("\"{}\"", reg_escape(&name)) };
+    for value in key.enum_values() {
+        let (name, value) = value?;
+        let name = if name.is_empty() { "@".to_string() } else { reg_quote(&name)? };
         out.push_str(&format!("{name}={}\r\n", reg_data(&value)));
     }
     out.push_str("\r\n");
-    for sub in key.enum_keys().flatten() {
-        if let Ok(child) = key.open_subkey_with_flags(&sub, KEY_READ | KEY_WOW64_64KEY) {
-            export_key(&child, &format!(r"{path}\{sub}"), out);
+    for sub in key.enum_keys() {
+        let sub = sub?;
+        match key.open_subkey_with_flags(&sub, KEY_READ | KEY_WOW64_64KEY) {
+            Ok(child) => export_key(&child, &format!(r"{path}\{sub}"), out)?,
+            Err(e) if e.kind() == NotFound => {} // removed meanwhile
+            Err(e) => return Err(e.into()),
         }
     }
+    Ok(())
 }
 
 /// Saves a key and everything under it as a `.reg` file, which restores it
@@ -667,7 +686,7 @@ fn backup_key(backup_dir: &Path, label: &str, sub: &str) -> anyhow::Result<()> {
     let failed = "Couldn't back up the key before removing it";
     let key = RegKey::predef(hive).open_subkey_with_flags(sub, KEY_READ | KEY_WOW64_64KEY).context(failed)?;
     let mut reg = String::from("Windows Registry Editor Version 5.00\r\n\r\n");
-    export_key(&key, &format!(r"{root}\{sub}"), &mut reg);
+    export_key(&key, &format!(r"{root}\{sub}"), &mut reg).context(failed)?;
     write_utf16(&backup_file(backup_dir, label, sub, "reg")?, &reg).context(failed)
 }
 
@@ -1133,6 +1152,27 @@ mod tests {
 
         assert!(imported.status.success(), "{}", String::from_utf8_lossy(&imported.stderr));
         assert_eq!(after.unwrap(), before);
+    }
+
+    #[test]
+    fn names_that_could_inject_into_a_backup_stop_the_removal() {
+        let sub = format!(r"Software\ReclaimInjectTest{}", std::process::id());
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        let (key, _) = hkcu.create_subkey(&sub).unwrap();
+        // Opening a backup of this would also write a machine-wide key.
+        key.set_value("x\"=\"\r\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\ReclaimInjected]\r\n\"y", &"z").unwrap();
+        drop(key);
+        let dir = std::env::temp_dir().join(format!("reclaim-inject-test-{}", std::process::id()));
+        let item = leftover(LeftoverKind::RegistryKey, Path::new(&format!(r"HKCU\{sub}")));
+        let outcomes = remove_all(std::slice::from_ref(&item), &dir, false);
+        let written = std::fs::read_dir(&dir).map(|d| d.count()).unwrap_or(0);
+        let survived = hkcu.open_subkey(&sub).is_ok();
+        let _ = hkcu.delete_subkey_all(&sub);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(outcomes[0].is_err(), "the backup must fail");
+        assert_eq!(written, 0, "no backup file is written");
+        assert!(survived, "nothing is removed without a backup");
     }
 
     #[test]
