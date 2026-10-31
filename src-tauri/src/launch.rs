@@ -27,6 +27,8 @@ pub const REMOVE_LEFTOVERS: &str = "--remove-leftovers";
 /// The list file's hash. It comes on the command line because nothing can
 /// change that once the UAC prompt is up, unlike the file itself.
 pub const LIST_SHA256: &str = "--sha256";
+/// Tells the elevated helper to skip the Recycle Bin.
+pub const PERMANENTLY: &str = "--permanently";
 
 fn command_line() -> impl Iterator<Item = String> {
     std::env::args_os().map(|arg| arg.to_string_lossy().into_owned())
@@ -83,7 +85,8 @@ pub fn on_second_instance(app: &AppHandle, args: Vec<String>, _cwd: String) {
 pub fn run_leftover_helper() -> bool {
     let Some(list) = value_of(REMOVE_LEFTOVERS, command_line()) else { return false };
     if let Some(sha256) = value_of(LIST_SHA256, command_line()) {
-        crate::programs::leftovers::remove_listed(std::path::Path::new(&list), &sha256);
+        let permanent = command_line().any(|arg| arg == PERMANENTLY);
+        crate::programs::leftovers::remove_listed(std::path::Path::new(&list), &sha256, permanent);
     }
     true
 }

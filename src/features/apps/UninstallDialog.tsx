@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { CircleCheck, FileText, Folder, KeyRound, ListTree, TriangleAlert } from "lucide-react";
+import { CalendarClock, CircleCheck, Cog, FileText, Folder, KeyRound, ListTree, Shield, TriangleAlert } from "lucide-react";
 import { api, errorMessage, type Leftover, type Program } from "../../lib/api";
 import { formatBytes, plural } from "../../lib/format";
 import { useApp } from "../../state/app";
@@ -14,11 +14,15 @@ type Step =
   | { kind: "stillInstalled"; exitCode: number | null }
   | { kind: "scanning" }
   | { kind: "review"; leftovers: Leftover[] }
-  | { kind: "removing" }
-  | { kind: "done"; removed: number; failures: Failure[]; recycledBytes: number }
+  | { kind: "removing"; permanent: boolean }
+  | ({ kind: "done"; failures: Failure[] } & Totals)
   | { kind: "error"; message: string };
 
-type Failure = { item: Leftover; error: string };
+/** `tooBig` means only the Recycle Bin refused it, so deleting permanently works. */
+type Failure = { item: Leftover; error: string; tooBig: boolean };
+type Totals = { removed: number; recycledBytes: number; deletedBytes: number };
+
+const NO_TOTALS: Totals = { removed: 0, recycledBytes: 0, deletedBytes: 0 };
 
 const MSI_USER_CANCELLED = 1602;
 const WAIT_FOR_HANDOFF_MS = 90_000;
@@ -98,28 +102,38 @@ export function UninstallDialog({
     }
   };
 
-  /** `before` carries totals from earlier attempts when retrying failures. */
-  const removeItems = async (items: Leftover[], before = { removed: 0, recycledBytes: 0 }) => {
-    setStep({ kind: "removing" });
+  /** On a later pass, `before` carries the earlier totals and `kept` the failures this pass leaves alone. */
+  const removeItems = async (items: Leftover[], { permanent = false, before = NO_TOTALS, kept = [] as Failure[] } = {}) => {
+    setStep({ kind: "removing", permanent });
     try {
-      const results = await api.removeLeftovers(items);
+      const results = await api.removeLeftovers(items, permanent);
       changed.current = true;
-      const failures = items.flatMap((item, i) => (results[i]?.ok ? [] : [{ item, error: results[i]?.error ?? "Unknown error" }]));
-      const recycledBytes = items
+      const failures = items.flatMap((item, i) => {
+        const result = results[i];
+        return result?.ok ? [] : [{ item, error: result?.error ?? "Unknown error", tooBig: result?.tooBigForRecycleBin ?? false }];
+      });
+      const freed = items
         .filter((item, i) => results[i]?.ok && (item.kind === "folder" || item.kind === "file"))
-        .reduce((sum, item) => sum + item.sizeBytes, before.recycledBytes);
-      setStep({ kind: "done", removed: before.removed + items.length - failures.length, failures, recycledBytes });
+        .reduce((sum, item) => sum + item.sizeBytes, 0);
+      if (permanent) addReclaimed(freed);
+      setStep({
+        kind: "done",
+        failures: [...kept, ...failures],
+        removed: before.removed + items.length - failures.length,
+        recycledBytes: before.recycledBytes + (permanent ? 0 : freed),
+        deletedBytes: before.deletedBytes + (permanent ? freed : 0),
+      });
     } catch (e) {
       setStep({ kind: "error", message: errorMessage(e) });
     }
   };
 
-  const retryFailures = () => {
+  /** Retries the failures the Recycle Bin refused (`permanent`) or the rest. */
+  const retry = (permanent: boolean) => {
     if (step.kind !== "done") return;
-    removeItems(
-      step.failures.map((f) => f.item),
-      { removed: step.removed, recycledBytes: step.recycledBytes },
-    );
+    const again = step.failures.filter((f) => f.tooBig === permanent);
+    const kept = step.failures.filter((f) => f.tooBig !== permanent);
+    removeItems(again.map((f) => f.item), { permanent, before: step, kept });
   };
 
   const close = () => onClose(changed.current);
@@ -149,13 +163,13 @@ export function UninstallDialog({
     <Dialog
       title={title}
       onClose={busy ? undefined : close}
-      footer={<Footer step={step} onClose={close} onUninstall={runUninstaller} onScan={scanLeftovers} onRetry={retryFailures} />}
+      footer={<Footer step={step} onClose={close} onUninstall={runUninstaller} onScan={scanLeftovers} onRetry={retry} />}
     >
       {step.kind === "confirm" && (
         <div className="flex flex-col gap-3">
           <p>
-            Reclaim runs {program.name}'s own uninstaller first. When it finishes, Reclaim looks for files and registry entries it left
-            behind so you can choose what to remove.
+            Reclaim runs {program.name}'s own uninstaller first. When it finishes, Reclaim looks for files, registry entries, services,
+            and scheduled tasks it left behind so you can choose what to remove.
           </p>
           {size !== null && (
             <p className="text-ink-3">
@@ -175,14 +189,19 @@ export function UninstallDialog({
         />
       )}
       {step.kind === "scanning" && (
-        <Progress label="Looking for leftovers" detail="Checking program folders, app data, shortcuts, and the registry." />
+        <Progress
+          label="Looking for leftovers"
+          detail="Checking program folders, app data, shortcuts, the registry, services, scheduled tasks, and firewall rules."
+        />
       )}
       {step.kind === "removing" && (
         <Progress
-          label="Removing leftovers"
+          label={step.permanent ? "Deleting permanently" : "Removing leftovers"}
           detail={
-            "Files go to the Recycle Bin. Registry entries are backed up before they're removed." +
-            (system?.elevated ? "" : " If Windows asks for permission, approve it so Reclaim can clear protected folders like Program Files.")
+            (step.permanent
+              ? "These skip the Recycle Bin."
+              : "Files go to the Recycle Bin. Registry entries, services, and tasks are backed up before they're removed.") +
+            (system?.elevated ? "" : " If Windows asks for permission, approve it so Reclaim can clear protected places like Program Files.")
           }
         />
       )}
@@ -218,7 +237,7 @@ function Footer({
   onClose: () => void;
   onUninstall: () => void;
   onScan: () => void;
-  onRetry: () => void;
+  onRetry: (permanent: boolean) => void;
 }) {
   switch (step.kind) {
     case "confirm":
@@ -248,16 +267,24 @@ function Footer({
         </>
       );
     case "done":
-    case "error":
+    case "error": {
+      // The app is gone from the list now, so this is the last chance to clear what's left.
+      const failures = step.kind === "done" ? step.failures : [];
+      const tooBigBytes = failures.filter((f) => f.tooBig).reduce((sum, f) => sum + f.item.sizeBytes, 0);
       return (
         <>
-          {/* The app is gone from the list now, so this is the last chance to clear what's left. */}
-          {step.kind === "done" && step.failures.length > 0 && <Button onClick={onRetry}>Try again</Button>}
+          {failures.some((f) => !f.tooBig) && <Button onClick={() => onRetry(false)}>Try again</Button>}
+          {failures.some((f) => f.tooBig) && (
+            <Button variant="danger" onClick={() => onRetry(true)}>
+              {tooBigBytes > 0 ? `Delete ${formatBytes(tooBigBytes)} permanently` : "Delete permanently"}
+            </Button>
+          )}
           <Button variant="primary" onClick={onClose} data-autofocus>
             Done
           </Button>
         </>
       );
+    }
     default:
       return null;
   }
@@ -285,7 +312,7 @@ function DoneSummary({ step, onEmptyBin }: { step: Extract<Step, { kind: "done" 
           <div>
             <div className="font-medium text-ink">Removed {plural(removed, "leftover")}</div>
             <div className="mt-1">
-              Registry entries were backed up as .reg files before removal.
+              Registry entries, services, and tasks were backed up before removal.
               {step.recycledBytes > 0 && (
                 <>
                   {" "}
@@ -295,6 +322,12 @@ function DoneSummary({ step, onEmptyBin }: { step: Extract<Step, { kind: "done" 
                     empty it
                   </button>
                   .
+                </>
+              )}
+              {step.deletedBytes > 0 && (
+                <>
+                  {" "}
+                  <span className="num text-ink-2">{formatBytes(step.deletedBytes)}</span> was deleted permanently and is already free.
                 </>
               )}
             </div>
@@ -312,12 +345,17 @@ function DoneSummary({ step, onEmptyBin }: { step: Extract<Step, { kind: "done" 
             <TriangleAlert className="size-3.5 text-warn" />
             {plural(failures.length, "item")} couldn't be removed
           </div>
+          {failures.some((f) => f.tooBig) && (
+            <p className="mb-2 text-[12px] text-ink-3">
+              The Recycle Bin can't take some of these. Deleting them permanently frees the space now, but they can't be restored.
+            </p>
+          )}
           <ul className="flex flex-col gap-1.5">
             {failures.map(({ item, error }) => (
-              <li key={item.path + (item.valueName ?? "")} className="text-[12px]">
+              <li key={item.kind + item.path + (item.valueName ?? "")} className="text-[12px]">
                 <div className="flex gap-3">
                   <span className="num min-w-0 flex-1 truncate text-ink-2" title={item.path}>
-                    {item.valueName ? `${item.path} → ${item.valueName}` : item.path}
+                    {describe(item)}
                   </span>
                   {item.sizeBytes > 0 && <span className="num shrink-0 text-ink-2">{formatBytes(item.sizeBytes)}</span>}
                 </div>
@@ -331,11 +369,28 @@ function DoneSummary({ step, onEmptyBin }: { step: Extract<Step, { kind: "done" 
   );
 }
 
-const KIND_ICON = {
+function describe(item: Leftover) {
+  return item.label ?? (item.valueName ? `${item.path} → ${item.valueName}` : item.path);
+}
+
+const KIND_ICON: Record<Leftover["kind"], React.ReactNode> = {
   folder: <Folder />,
   file: <FileText />,
   registryKey: <ListTree />,
   registryValue: <KeyRound />,
+  service: <Cog />,
+  scheduledTask: <CalendarClock />,
+  firewallRule: <Shield />,
+};
+
+const KIND_GROUP: Record<Leftover["kind"], number> = {
+  folder: 0,
+  file: 0,
+  registryKey: 1,
+  registryValue: 1,
+  service: 2,
+  scheduledTask: 2,
+  firewallRule: 2,
 };
 
 const CONFIDENCE: Record<Leftover["confidence"], { label: string; tone: "good" | "uv" | "neutral" }> = {
@@ -362,13 +417,13 @@ function LeftoverReview({
   onRemove: () => void;
 }) {
   const groups = useMemo(() => {
-    const files: number[] = [];
-    const registry: number[] = [];
-    leftovers.forEach((l, i) => (l.kind === "folder" || l.kind === "file" ? files : registry).push(i));
-    return [
-      { label: "Files and folders", ids: files },
-      { label: "Registry", ids: registry },
-    ].filter((g) => g.ids.length > 0);
+    const groups = [
+      { label: "Files and folders", ids: [] as number[] },
+      { label: "Registry", ids: [] as number[] },
+      { label: "Services, tasks, and firewall rules", ids: [] as number[] },
+    ];
+    leftovers.forEach((l, i) => groups[KIND_GROUP[l.kind]].ids.push(i));
+    return groups.filter((g) => g.ids.length > 0);
   }, [leftovers]);
 
   const selectedBytes = leftovers.reduce((sum, l, i) => sum + (selected.has(i) ? l.sizeBytes : 0), 0);
@@ -455,12 +510,12 @@ function LeftoverReview({
                         selected.has(i) ? "bg-uv-600/8" : "hover:bg-white/3",
                       )}
                     >
-                      <Checkbox label={l.path} checked={selected.has(i)} onChange={(on) => toggle(i, on)} className="mt-0.5" />
+                      <Checkbox label={describe(l)} checked={selected.has(i)} onChange={(on) => toggle(i, on)} className="mt-0.5" />
                       <span className="mt-0.5 text-ink-3 [&_svg]:size-4">{KIND_ICON[l.kind]}</span>
                       <div className="min-w-0">
                         <div className="num truncate text-[12px] text-ink" title={l.path}>
-                          {l.path}
-                          {l.valueName && <span className="text-uv-300"> → {l.valueName}</span>}
+                          {l.label ?? l.path}
+                          {!l.label && l.valueName && <span className="text-uv-300"> → {l.valueName}</span>}
                         </div>
                         <div className="mt-0.5 flex items-center gap-2 text-[12px] text-ink-3">
                           <Badge tone={conf.tone}>{conf.label}</Badge>

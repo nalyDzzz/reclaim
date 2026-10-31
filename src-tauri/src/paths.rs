@@ -91,6 +91,12 @@ pub fn known() -> &'static KnownDirs {
     })
 }
 
+/// A Windows tool by full path, so an exe of the same name next to Reclaim or
+/// on PATH can't stand in for it, which matters when Reclaim runs elevated.
+pub fn system32(exe: &str) -> PathBuf {
+    known().windows.join("System32").join(exe)
+}
+
 /// Expands 8.3 short names (`C:\PROGRA~1` -> `C:\Program Files`) so path
 /// comparisons see the real names. Paths that don't exist come back as-is.
 pub fn long_path(path: &Path) -> PathBuf {

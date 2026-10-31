@@ -47,7 +47,7 @@ export interface UninstallOutcome {
   stillInstalled: boolean;
 }
 
-export type LeftoverKind = "folder" | "file" | "registryKey" | "registryValue";
+export type LeftoverKind = "folder" | "file" | "registryKey" | "registryValue" | "service" | "scheduledTask" | "firewallRule";
 export type Confidence = "high" | "medium" | "low";
 
 export interface Leftover {
@@ -57,12 +57,16 @@ export interface Leftover {
   sizeBytes: number;
   confidence: Confidence;
   reason: string;
+  /** What to show instead of `path` when that's only an ID, like a service's display name. */
+  label: string | null;
 }
 
 export interface RemovalResult {
   path: string;
   valueName: string | null;
   ok: boolean;
+  /** Failed only because the Recycle Bin can't take it; deleting permanently would work. */
+  tooBigForRecycleBin: boolean;
   error: string | null;
 }
 
@@ -216,7 +220,7 @@ export const api = {
     installLocation: string | null;
     inferredLocation: string | null;
   }) => invoke<Leftover[]>("scan_leftovers", { query }),
-  removeLeftovers: (items: Leftover[]) => invoke<RemovalResult[]>("remove_leftovers", { items }),
+  removeLeftovers: (items: Leftover[], permanent = false) => invoke<RemovalResult[]>("remove_leftovers", { items, permanent }),
   registryBackupDir: () => invoke<string>("registry_backup_dir"),
 
   startScan: (path: string, onProgress: (p: ScanProgress) => void) => {

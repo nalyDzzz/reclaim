@@ -1,9 +1,12 @@
 //! Finds what an uninstaller left behind (folders, shortcuts, registry keys,
-//! startup entries) and removes the ones the person confirms.
+//! startup entries, services, scheduled tasks, firewall rules) and removes
+//! the ones the person confirms.
 //!
 //! Matching is deliberately conservative: names must match exactly after
 //! normalization, and every candidate carries a confidence level so the UI
 //! only pre-selects the ones that are almost certainly safe.
+
+mod registrations;
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -41,6 +44,12 @@ pub enum LeftoverKind {
     File,
     RegistryKey,
     RegistryValue,
+    /// `path` is the service's name.
+    Service,
+    /// `path` is the task's full path, like `\Vendor\Updater`.
+    ScheduledTask,
+    /// `path` is the rule's ID in the firewall's registry key.
+    FirewallRule,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -60,6 +69,9 @@ pub struct Leftover {
     size_bytes: u64,
     confidence: Confidence,
     reason: String,
+    /// What to show instead of `path` when that's only an ID.
+    #[serde(default)]
+    label: Option<String>,
 }
 
 fn compact(s: &str) -> String {
@@ -172,7 +184,21 @@ impl Collector {
         if !self.seen.insert(key) {
             return;
         }
-        self.items.push(Leftover { kind, path, value_name, size_bytes: 0, confidence, reason: reason.to_string() });
+        self.items.push(Leftover { kind, path, value_name, size_bytes: 0, confidence, reason: reason.to_string(), label: None });
+    }
+
+    fn push_registration(&mut self, found: registrations::Found) {
+        if self.seen.insert(format!("{:?}|{}", found.kind, found.id.to_lowercase())) {
+            self.items.push(Leftover {
+                kind: found.kind,
+                path: found.id,
+                value_name: None,
+                size_bytes: 0,
+                confidence: found.confidence,
+                reason: found.reason.to_string(),
+                label: found.label,
+            });
+        }
     }
 
     fn push_path(&mut self, path: &Path, confidence: Confidence, reason: &str) {
@@ -375,16 +401,9 @@ fn scan_registry(q: &LeftoverQuery, names: &NameVariants, out: &mut Collector) {
     }
 
     // Startup entries, App Paths registrations, and Windows' own records that
-    // point into the app's folder. A protected folder like Program Files
-    // itself would match every app, so it never counts.
-    let locations: Vec<String> = [&q.install_location, &q.inferred_location]
-        .into_iter()
-        .flatten()
-        .map(|l| PathBuf::from(l.trim_matches('"')))
-        .filter(|l| !paths::is_protected(l))
-        .map(|l| normalize(&l))
-        .collect();
-    let points_inside = |data: &str| mentions_path_inside(data, &locations);
+    // point into the app's folder.
+    let folders = app_folders(q);
+    let points_inside = |data: &str| points_into(data, &folders);
     let run_keys = [
         ("HKCU", RegKey::predef(HKEY_CURRENT_USER), r"Software\Microsoft\Windows\CurrentVersion\Run"),
         ("HKLM", RegKey::predef(HKEY_LOCAL_MACHINE), r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run"),
@@ -394,9 +413,8 @@ fn scan_registry(q: &LeftoverQuery, names: &NameVariants, out: &mut Collector) {
         let Ok(key) = hive.open_subkey_with_flags(path, KEY_READ | KEY_WOW64_64KEY) else { continue };
         for (value_name, _) in key.enum_values().flatten() {
             let data: String = key.get_value(&value_name).unwrap_or_default();
-            let (hit, confidence) =
-                if points_inside(&data) { (true, Confidence::High) } else { (names.matches_name(&value_name), Confidence::Medium) };
-            if hit {
+            let named = names.matches_name(&value_name).then_some(Confidence::Medium);
+            if let Some(confidence) = points_inside(&data).max(named) {
                 out.push(LeftoverKind::RegistryValue, format!(r"{label}\{path}"), Some(value_name), confidence, "Starts with Windows");
             }
         }
@@ -410,25 +428,49 @@ fn scan_registry(q: &LeftoverQuery, names: &NameVariants, out: &mut Collector) {
         for exe in key.enum_keys().flatten() {
             let target: String =
                 key.open_subkey_with_flags(&exe, KEY_READ | KEY_WOW64_64KEY).and_then(|k| k.get_value("")).unwrap_or_default();
-            if !target.is_empty() && points_inside(&target) {
-                out.push(LeftoverKind::RegistryKey, format!(r"{label}\{path}\{exe}"), None, Confidence::High, "Registered app path");
+            if let Some(confidence) = points_inside(&target) {
+                out.push(LeftoverKind::RegistryKey, format!(r"{label}\{path}\{exe}"), None, confidence, "Registered app path");
             }
         }
     }
     for (label, hive, path) in PER_PROGRAM_TRACE_KEYS {
         let Ok(key) = RegKey::predef(*hive).open_subkey_with_flags(path, KEY_READ | KEY_WOW64_64KEY) else { continue };
         for (value_name, _) in key.enum_values().flatten() {
-            if points_inside(&value_name) {
+            if let Some(confidence) = points_inside(&value_name) {
                 out.push(
                     LeftoverKind::RegistryValue,
                     format!(r"{label}\{path}"),
                     Some(value_name),
-                    Confidence::High,
+                    confidence,
                     "Windows' record of the app",
                 );
             }
         }
     }
+}
+
+/// The app's folders, normalized, each with how sure Reclaim is that it's
+/// the app's own: a registered folder whose name doesn't match the app may
+/// be shared with others. A protected folder like Program Files itself
+/// would match every app, so it never counts.
+fn app_folders(q: &LeftoverQuery) -> Vec<(String, Confidence)> {
+    let registered = q.install_location.as_ref().map(|l| {
+        let related = super::related_to(Path::new(l.trim_matches('"')), &q.name, q.publisher.as_deref());
+        (l, if related { Confidence::High } else { Confidence::Low })
+    });
+    registered
+        .into_iter()
+        .chain(q.inferred_location.as_ref().map(|l| (l, Confidence::High)))
+        .map(|(l, confidence)| (PathBuf::from(l.trim_matches('"')), confidence))
+        .filter(|(l, _)| !paths::is_protected(l))
+        .map(|(l, confidence)| (normalize(&l), confidence))
+        .collect()
+}
+
+/// How sure Reclaim is that `text` (a command line or path) points into the
+/// app, going by the surest of `folders` it mentions. None if it mentions none.
+fn points_into(text: &str, folders: &[(String, Confidence)]) -> Option<Confidence> {
+    folders.iter().filter(|(folder, _)| mentions_path_inside(text, folder)).map(|(_, confidence)| *confidence).max()
 }
 
 /// Keys where Windows records facts about each program it has run, one value
@@ -440,15 +482,13 @@ const PER_PROGRAM_TRACE_KEYS: &[(&str, HKEY, &str)] = &[
     ("HKLM", HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers"),
 ];
 
-/// Whether `text` (a command line or path) mentions a path inside one of the
-/// normalized `folders`. The folder name has to end there, so a mention of
+/// Whether `text` (a command line or path) mentions a path inside the
+/// normalized `folder`. The folder name has to end there, so a mention of
 /// `C:\Apps\Foobar` isn't inside `C:\Apps\Foo`.
-fn mentions_path_inside(text: &str, folders: &[String]) -> bool {
+fn mentions_path_inside(text: &str, folder: &str) -> bool {
     let text = text.to_lowercase().replace('/', "\\");
-    folders.iter().any(|folder| {
-        text.match_indices(folder.as_str()).any(|(at, _)| {
-            text[at + folder.len()..].chars().next().is_none_or(|c| matches!(c, '\\' | '"' | '\'' | ',' | ';') || c.is_whitespace())
-        })
+    text.match_indices(folder).any(|(at, _)| {
+        text[at + folder.len()..].chars().next().is_none_or(|c| matches!(c, '\\' | '"' | '\'' | ',' | ';') || c.is_whitespace())
     })
 }
 
@@ -459,6 +499,9 @@ pub async fn scan_leftovers(query: LeftoverQuery) -> CmdResult<Vec<Leftover>> {
         let mut out = Collector { items: Vec::new(), seen: HashSet::new() };
         scan_filesystem(&query, &names, &mut out);
         scan_registry(&query, &names, &mut out);
+        for found in registrations::find(&app_folders(&query)) {
+            out.push_registration(found);
+        }
 
         // Drop entries nested inside another candidate folder.
         let folders: Vec<String> =
@@ -488,6 +531,9 @@ pub struct RemovalResult {
     path: String,
     value_name: Option<String>,
     ok: bool,
+    /// Failed only because the Recycle Bin can't take it, so deleting it
+    /// permanently would work.
+    too_big_for_recycle_bin: bool,
     error: Option<String>,
 }
 
@@ -567,13 +613,19 @@ fn split_reg_path(path: &str) -> anyhow::Result<(&'static str, RegKey, String)> 
     Ok((label, key, sub.to_string()))
 }
 
+/// A new file in `dir` to back `what` up into, named so backups sort by time.
+fn backup_file(dir: &Path, label: &str, what: &str, extension: &str) -> anyhow::Result<PathBuf> {
+    std::fs::create_dir_all(dir)?;
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    // ASCII only, so cutting it to length can't split a character.
+    let safe: String = what.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
+    Ok(dir.join(format!("{stamp}_{label}_{}.{extension}", &safe[safe.len().saturating_sub(80)..])))
+}
+
 fn backup_key(backup_dir: &Path, label: &str, sub: &str) -> anyhow::Result<()> {
     use std::os::windows::process::CommandExt;
-    std::fs::create_dir_all(backup_dir)?;
-    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    let safe: String = sub.chars().map(|c| if c.is_alphanumeric() { c } else { '_' }).collect();
-    let file = backup_dir.join(format!("{stamp}_{label}_{}.reg", &safe[safe.len().saturating_sub(80)..]));
-    let status = Command::new("reg.exe")
+    let file = backup_file(backup_dir, label, sub, "reg")?;
+    let status = Command::new(paths::system32("reg.exe"))
         .args(["export", &format!(r"{label}\{sub}"), &file.to_string_lossy(), "/y", "/reg:64"])
         .creation_flags(CREATE_NO_WINDOW)
         .status()?;
@@ -581,33 +633,98 @@ fn backup_key(backup_dir: &Path, label: &str, sub: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Windows refused a removal that an elevated copy of Reclaim may be allowed
-/// to make.
+/// Why Windows refused a removal, when Reclaim can still do something about it.
 #[derive(Debug)]
-struct Denied(&'static str);
+enum Refused {
+    /// An elevated copy of Reclaim may be allowed to make it.
+    Denied(&'static str),
+    /// Too large for the Recycle Bin on its drive. Deleting permanently works.
+    TooBigForRecycleBin(&'static str),
+}
 
-impl std::fmt::Display for Denied {
+impl std::fmt::Display for Refused {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.0)
+        match self {
+            Refused::Denied(message) | Refused::TooBigForRecycleBin(message) => f.write_str(message),
+        }
     }
 }
 
-impl std::error::Error for Denied {}
+impl std::error::Error for Refused {}
+
+fn was_denied(e: &anyhow::Error) -> bool {
+    matches!(e.downcast_ref::<Refused>(), Some(Refused::Denied(_)))
+}
+
+fn was_too_big(e: &anyhow::Error) -> bool {
+    matches!(e.downcast_ref::<Refused>(), Some(Refused::TooBigForRecycleBin(_)))
+}
 
 /// The shell reports every failure the same way, so this can't say which.
 const RECYCLE_FAILED: &str =
     "Windows couldn't move this to the Recycle Bin. A program may be using it, or it may be too large for the Recycle Bin.";
 
-/// Removes one leftover. Registry entries are exported to `backup_dir` first;
-/// `None` means the caller already did that.
-fn remove_one(item: &Leftover, backup_dir: Option<&Path>) -> anyhow::Result<()> {
+/// How many bytes the Recycle Bin on `path`'s drive holds, or 0 when it's
+/// turned off. None when Windows has no settings recorded for the drive.
+fn recycle_bin_capacity(path: &Path) -> Option<u64> {
+    use windows::Win32::Storage::FileSystem::{GetVolumeNameForVolumeMountPointW, GetVolumePathNameW};
+    use windows::core::{HSTRING, PCWSTR};
+    let mut mount = [0u16; 261];
+    unsafe { GetVolumePathNameW(&HSTRING::from(path.as_os_str()), &mut mount) }.ok()?;
+    let mut volume = [0u16; 64];
+    unsafe { GetVolumeNameForVolumeMountPointW(PCWSTR(mount.as_ptr()), &mut volume) }.ok()?;
+    let volume = String::from_utf16_lossy(&volume[..volume.iter().position(|&c| c == 0)?]);
+    let guid = volume.strip_prefix(r"\\?\Volume")?.trim_end_matches('\\');
+    let settings = format!(r"Software\Microsoft\Windows\CurrentVersion\Explorer\BitBucket\Volume\{guid}");
+    let key = RegKey::predef(HKEY_CURRENT_USER).open_subkey_with_flags(settings, KEY_READ).ok()?;
+    if key.get_value::<u32, _>("NukeOnDelete").is_ok_and(|nuke| nuke != 0) {
+        return Some(0);
+    }
+    key.get_value::<u32, _>("MaxCapacity").ok().map(|mb| u64::from(mb) << 20)
+}
+
+fn delete_permanently(path: &Path) -> anyhow::Result<()> {
+    // Neither follows a junction or symlink; each removes only the link.
+    let result = if path.is_dir() { std::fs::remove_dir_all(path) } else { std::fs::remove_file(path) };
+    result.map_err(|e| {
+        if e.kind() == std::io::ErrorKind::PermissionDenied {
+            Refused::Denied("Windows denied access to part of this.").into()
+        } else {
+            anyhow::Error::from(e)
+        }
+    })
+}
+
+/// Removes one leftover, to the Recycle Bin unless `permanent`. Registry
+/// entries, services, and tasks are backed up to `backup_dir` first; `None`
+/// means the caller already did that.
+fn remove_one(item: &Leftover, backup_dir: Option<&Path>, permanent: bool) -> anyhow::Result<()> {
     match item.kind {
         LeftoverKind::Folder | LeftoverKind::File => {
             let path = Path::new(&item.path);
             crate::error::ensure!(!paths::is_protected(path), "This location is protected");
-            if path.exists() {
-                trash::delete(path).map_err(|_| Denied(RECYCLE_FAILED))?;
+            if !path.exists() {
+                return Ok(());
             }
+            if permanent {
+                return delete_permanently(path);
+            }
+            // The shell would refuse, or with any UI allowed, offer to delete it permanently itself.
+            match recycle_bin_capacity(path) {
+                Some(0) => return Err(Refused::TooBigForRecycleBin("The Recycle Bin is turned off for this drive.").into()),
+                Some(capacity) if item.size_bytes > capacity => {
+                    return Err(Refused::TooBigForRecycleBin("Too large for the Recycle Bin on this drive.").into());
+                }
+                _ => trash::delete(path).map_err(|_| Refused::Denied(RECYCLE_FAILED))?,
+            }
+        }
+        LeftoverKind::Service | LeftoverKind::ScheduledTask | LeftoverKind::FirewallRule => {
+            if let Some(dir) = backup_dir
+                && registrations::exists(item)
+            {
+                registrations::backup(item, dir)?;
+            }
+            registrations::remove(item)?;
         }
         LeftoverKind::RegistryKey => {
             let (label, hive, sub) = split_reg_path(&item.path)?;
@@ -640,7 +757,11 @@ fn remove_one(item: &Leftover, backup_dir: Option<&Path>) -> anyhow::Result<()> 
 }
 
 fn access_error(e: std::io::Error) -> anyhow::Error {
-    if e.kind() == std::io::ErrorKind::PermissionDenied { Denied("Windows denied access to this registry entry.").into() } else { e.into() }
+    if e.kind() == std::io::ErrorKind::PermissionDenied {
+        Refused::Denied("Windows denied access to this registry entry.").into()
+    } else {
+        e.into()
+    }
 }
 
 /// Whether `item` is in HKLM or outside every user profile, where removing it
@@ -654,6 +775,7 @@ fn is_machine_wide(item: &Leftover) -> bool {
             !paths::is_under(&normalize(&paths::long_path(Path::new(&item.path))), &normalize(profiles))
         }
         LeftoverKind::RegistryKey | LeftoverKind::RegistryValue => split_reg_path(&item.path).is_ok_and(|(label, ..)| label == "HKLM"),
+        LeftoverKind::Service | LeftoverKind::ScheduledTask | LeftoverKind::FirewallRule => true,
     }
 }
 
@@ -661,6 +783,7 @@ fn still_present(item: &Leftover) -> bool {
     use std::io::ErrorKind::NotFound;
     match item.kind {
         LeftoverKind::Folder | LeftoverKind::File => std::fs::symlink_metadata(&item.path).is_ok(),
+        LeftoverKind::Service | LeftoverKind::ScheduledTask | LeftoverKind::FirewallRule => registrations::exists(item),
         LeftoverKind::RegistryKey | LeftoverKind::RegistryValue => {
             let Ok((_, hive, sub)) = split_reg_path(&item.path) else { return true };
             let key = match hive.open_subkey_with_flags(&sub, KEY_READ | KEY_WOW64_64KEY) {
@@ -678,14 +801,17 @@ fn still_present(item: &Leftover) -> bool {
 /// Removes `items` in an elevated copy of Reclaim, which shows a UAC prompt,
 /// the same way an uninstaller gets its rights. The copy reports nothing
 /// back, so callers check afterwards what's gone.
-fn remove_elevated(items: &[&Leftover]) -> anyhow::Result<()> {
-    use crate::launch::{LIST_SHA256, REMOVE_LEFTOVERS};
+fn remove_elevated(items: &[&Leftover], permanent: bool) -> anyhow::Result<()> {
+    use crate::launch::{LIST_SHA256, PERMANENTLY, REMOVE_LEFTOVERS};
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
     let list = std::env::temp_dir().join(format!("reclaim-leftovers-{}-{nanos}.json", std::process::id()));
     let data = serde_json::to_vec(items)?;
     std::fs::write(&list, &data)?;
     let exe = std::env::current_exe()?;
-    let params = format!(r#"{REMOVE_LEFTOVERS} "{}" {LIST_SHA256} {}"#, list.display(), sha256_hex(&data));
+    let mut params = format!(r#"{REMOVE_LEFTOVERS} "{}" {LIST_SHA256} {}"#, list.display(), sha256_hex(&data));
+    if permanent {
+        params = format!("{params} {PERMANENTLY}");
+    }
     let launched = shell_execute_and_wait(Some("runas"), &exe.to_string_lossy(), &params);
     let _ = std::fs::remove_file(&list);
     match launched {
@@ -716,49 +842,59 @@ fn read_list(list: &Path, sha256: &str) -> Option<Vec<Leftover>> {
 
 /// What the elevated copy started by `remove_elevated` runs. It only takes
 /// machine-wide items, and the usual protections still apply to each one.
-pub fn remove_listed(list: &Path, sha256: &str) {
+pub fn remove_listed(list: &Path, sha256: &str, permanent: bool) {
     let Some(items) = read_list(list, sha256) else { return };
     for item in items.iter().filter(|item| is_machine_wide(item)) {
-        // The copy that asked already backed up these registry entries: it
-        // only asks after a backup succeeded and the removal was denied.
-        let _ = remove_one(item, None);
+        // The copy that asked already backed these up: it only asks after a
+        // backup succeeded and the removal was denied.
+        let _ = remove_one(item, None, permanent);
     }
 }
 
 /// Removes each item, then retries the machine-wide ones Windows refused in
 /// an elevated copy, so one UAC prompt covers Program Files and HKLM.
-fn remove_all(items: &[Leftover], backup_dir: &Path) -> Vec<anyhow::Result<()>> {
-    let mut outcomes: Vec<_> = items.iter().map(|item| remove_one(item, Some(backup_dir))).collect();
+fn remove_all(items: &[Leftover], backup_dir: &Path, permanent: bool) -> Vec<anyhow::Result<()>> {
+    let mut outcomes: Vec<_> = items.iter().map(|item| remove_one(item, Some(backup_dir), permanent)).collect();
     if is_elevated() {
         return outcomes;
     }
     let retry: Vec<usize> =
-        (0..items.len()).filter(|&i| outcomes[i].as_ref().is_err_and(|e| e.is::<Denied>()) && is_machine_wide(&items[i])).collect();
+        (0..items.len()).filter(|&i| outcomes[i].as_ref().is_err_and(was_denied) && is_machine_wide(&items[i])).collect();
     if retry.is_empty() {
         return outcomes;
     }
-    let elevated = remove_elevated(&retry.iter().map(|&i| &items[i]).collect::<Vec<_>>());
+    let elevated = remove_elevated(&retry.iter().map(|&i| &items[i]).collect::<Vec<_>>(), permanent);
     for i in retry {
         let item = &items[i];
         outcomes[i] = match &elevated {
             Err(e) => Err(anyhow::anyhow!("{e}")),
             Ok(()) if !still_present(item) => Ok(()),
-            Ok(()) if matches!(item.kind, LeftoverKind::Folder | LeftoverKind::File) => Err(anyhow::anyhow!(
-                "Still there after trying as administrator. A program may be using it, or it may be too large for the Recycle Bin."
-            )),
-            Ok(()) => Err(anyhow::anyhow!("Still there after trying as administrator. Windows may protect this entry.")),
+            Ok(()) => Err(anyhow::anyhow!(match item.kind {
+                LeftoverKind::Folder | LeftoverKind::File if permanent => {
+                    "Still there after trying as administrator. A program may be using it."
+                }
+                LeftoverKind::Folder | LeftoverKind::File => {
+                    "Still there after trying as administrator. A program may be using it, or it may be too large for the Recycle Bin."
+                }
+                LeftoverKind::RegistryKey | LeftoverKind::RegistryValue => {
+                    "Still there after trying as administrator. Windows may protect this entry."
+                }
+                LeftoverKind::Service => "Still there after trying as administrator. The service may not have stopped.",
+                LeftoverKind::ScheduledTask | LeftoverKind::FirewallRule => "Still there after trying as administrator.",
+            })),
         };
     }
     outcomes
 }
 
-/// Moves files to the Recycle Bin and deletes registry entries after
-/// exporting a `.reg` backup of each one.
+/// Moves files to the Recycle Bin, or deletes them if `permanent`, and
+/// removes registry entries, services, tasks, and firewall rules after
+/// backing each one up.
 #[tauri::command]
-pub async fn remove_leftovers(app: AppHandle, items: Vec<Leftover>) -> CmdResult<Vec<RemovalResult>> {
+pub async fn remove_leftovers(app: AppHandle, items: Vec<Leftover>, permanent: bool) -> CmdResult<Vec<RemovalResult>> {
     let backup_dir = app.path().app_local_data_dir()?.join("registry-backups");
     let results = tauri::async_runtime::spawn_blocking(move || {
-        let outcomes = remove_all(&items, &backup_dir);
+        let outcomes = remove_all(&items, &backup_dir, permanent);
         items
             .iter()
             .zip(outcomes)
@@ -766,6 +902,7 @@ pub async fn remove_leftovers(app: AppHandle, items: Vec<Leftover>) -> CmdResult
                 path: item.path.clone(),
                 value_name: item.value_name.clone(),
                 ok: result.is_ok(),
+                too_big_for_recycle_bin: result.as_ref().is_err_and(was_too_big),
                 error: result.err().map(|e| format!("{e:#}")),
             })
             .collect::<Vec<_>>()
@@ -774,7 +911,7 @@ pub async fn remove_leftovers(app: AppHandle, items: Vec<Leftover>) -> CmdResult
     Ok(results)
 }
 
-/// Folder holding `.reg` backups of removed registry entries.
+/// Folder holding backups of removed registry entries, services, and tasks.
 #[tauri::command]
 pub fn registry_backup_dir(app: AppHandle) -> CmdResult<String> {
     Ok(app.path().app_local_data_dir()?.join("registry-backups").to_string_lossy().to_string())
@@ -807,12 +944,30 @@ mod tests {
 
     #[test]
     fn path_mentions_stop_at_folder_boundaries() {
-        let folders = vec![normalize(Path::new(r"C:\Program Files\NTLite"))];
-        assert!(mentions_path_inside(r"C:\Program Files\NTLite\unins000.exe.FriendlyAppName", &folders));
-        assert!(mentions_path_inside(r#""C:\Program Files\NTLite\NTLite.exe" /tray"#, &folders));
-        assert!(mentions_path_inside(r"c:/program files/ntlite", &folders));
-        assert!(!mentions_path_inside(r"C:\Program Files\NTLite2\NTLite.exe", &folders));
-        assert!(!mentions_path_inside(r"C:\Users\me\Downloads\NTLite_setup_x64.exe", &folders));
+        let folder = normalize(Path::new(r"C:\Program Files\NTLite"));
+        assert!(mentions_path_inside(r"C:\Program Files\NTLite\unins000.exe.FriendlyAppName", &folder));
+        assert!(mentions_path_inside(r#""C:\Program Files\NTLite\NTLite.exe" /tray"#, &folder));
+        assert!(mentions_path_inside(r"c:/program files/ntlite", &folder));
+        assert!(!mentions_path_inside(r"C:\Program Files\NTLite2\NTLite.exe", &folder));
+        assert!(!mentions_path_inside(r"C:\Users\me\Downloads\NTLite_setup_x64.exe", &folder));
+    }
+
+    #[test]
+    fn a_folder_that_might_be_shared_never_pre_selects() {
+        let query = |install: &str| LeftoverQuery {
+            program_id: String::new(),
+            name: "NTLite".into(),
+            publisher: Some("Nlitesoft".into()),
+            install_location: Some(install.into()),
+            inferred_location: None,
+        };
+        let pf = &known().program_files;
+        let ours = app_folders(&query(&pf.join(r"NTLite\").to_string_lossy()));
+        assert_eq!(points_into(&format!(r"{}\NTLite\svc.exe", pf.display()), &ours), Some(Confidence::High));
+        let shared = app_folders(&query(&pf.join("Tools").to_string_lossy()));
+        assert_eq!(points_into(&format!(r"{}\Tools\other.exe", pf.display()), &shared), Some(Confidence::Low));
+        // Program Files itself would match every app.
+        assert!(app_folders(&query(&pf.to_string_lossy())).is_empty());
     }
 
     fn leftover(kind: LeftoverKind, path: &Path) -> Leftover {
@@ -823,6 +978,7 @@ mod tests {
             size_bytes: 0,
             confidence: Confidence::High,
             reason: String::new(),
+            label: None,
         }
     }
 
@@ -835,6 +991,7 @@ mod tests {
         assert!(!is_machine_wide(&leftover(LeftoverKind::Folder, &k.user_profile.join(".ollama"))));
         assert!(is_machine_wide(&leftover(LeftoverKind::RegistryKey, Path::new(r"HKLM\SOFTWARE\NTLite"))));
         assert!(!is_machine_wide(&leftover(LeftoverKind::RegistryKey, Path::new(r"HKCU\Software\NTLite"))));
+        assert!(is_machine_wide(&leftover(LeftoverKind::Service, Path::new("NTLiteSvc"))));
     }
 
     #[test]
@@ -859,7 +1016,7 @@ mod tests {
         let list = dir.with_extension("json");
         let data = serde_json::to_vec(&[leftover(LeftoverKind::Folder, &dir)]).unwrap();
         std::fs::write(&list, &data).unwrap();
-        remove_listed(&list, &sha256_hex(&data));
+        remove_listed(&list, &sha256_hex(&data), true);
         let survived = dir.exists();
         let _ = std::fs::remove_file(&list);
         let _ = std::fs::remove_dir_all(&dir);
@@ -869,17 +1026,31 @@ mod tests {
     #[test]
     fn refused_removal_can_be_retried_elevated() {
         use std::process::Command;
-        let dir = std::env::temp_dir().join(format!("reclaim-denied-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("file.bin"), b"x").unwrap();
-        let user = std::env::var("USERNAME").unwrap();
-        let acl = |args: &[&str]| Command::new("icacls").arg(&dir).args(args).output().unwrap().status.success();
-        assert!(acl(&["/deny", &format!("{user}:(OI)(CI)(DE,DC)")]));
-        let result = remove_one(&leftover(LeftoverKind::Folder, &dir), None);
-        acl(&["/remove:d", &user, "/T"]);
+        for permanent in [false, true] {
+            let dir = std::env::temp_dir().join(format!("reclaim-denied-test-{}-{permanent}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("file.bin"), b"x").unwrap();
+            let user = std::env::var("USERNAME").unwrap();
+            let acl = |args: &[&str]| Command::new("icacls").arg(&dir).args(args).output().unwrap().status.success();
+            assert!(acl(&["/deny", &format!("{user}:(OI)(CI)(DE,DC)")]));
+            let result = remove_one(&leftover(LeftoverKind::Folder, &dir), None, permanent);
+            acl(&["/remove:d", &user, "/T"]);
+            let _ = std::fs::remove_dir_all(&dir);
+            let err = result.expect_err("removal should be refused");
+            assert!(was_denied(&err), "permanent={permanent}: {err:#}");
+        }
+    }
+
+    #[test]
+    fn permanent_removal_skips_the_recycle_bin() {
+        let dir = std::env::temp_dir().join(format!("reclaim-permanent-test-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("nested")).unwrap();
+        std::fs::write(dir.join(r"nested\file.bin"), b"x").unwrap();
+        let result = remove_one(&leftover(LeftoverKind::Folder, &dir), None, true);
+        let survived = dir.exists();
         let _ = std::fs::remove_dir_all(&dir);
-        let err = result.expect_err("removal should be refused");
-        assert!(err.is::<Denied>(), "{err:#}");
+        result.unwrap();
+        assert!(!survived);
     }
 
     #[test]

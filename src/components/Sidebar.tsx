@@ -79,7 +79,7 @@ export function Sidebar({ page, onNavigate }: { page: Page; onNavigate: (p: Page
               <ShieldHalf className="mt-0.5 size-4 shrink-0 text-warn" />
               <span className="flex flex-col gap-0.5">
                 <span className="text-[12.5px] font-medium text-ink">Restart as administrator</span>
-                <span className="text-[11.5px] leading-snug text-ink-3">Needed for system cleanup and machine-wide leftovers</span>
+                <span className="text-[11.5px] leading-snug text-ink-3">Needed for system cleanup, some tweaks, and full scans</span>
               </span>
             </button>
           ))}
