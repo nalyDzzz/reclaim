@@ -67,6 +67,8 @@ export interface RemovalResult {
   ok: boolean;
   /** Failed only because the Recycle Bin can't take it; deleting permanently would work. */
   tooBigForRecycleBin: boolean;
+  /** Failed only because File Explorer has the app's shell extension loaded; restarting Explorer frees it. */
+  heldByShell: boolean;
   error: string | null;
 }
 
@@ -221,6 +223,7 @@ export const api = {
     inferredLocation: string | null;
   }) => invoke<Leftover[]>("scan_leftovers", { query }),
   removeLeftovers: (items: Leftover[], permanent = false) => invoke<RemovalResult[]>("remove_leftovers", { items, permanent }),
+  releaseFromShell: (paths: string[]) => invoke<void>("release_from_shell", { paths }),
   registryBackupDir: () => invoke<string>("registry_backup_dir"),
 
   startScan: (path: string, onProgress: (p: ScanProgress) => void) => {

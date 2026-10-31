@@ -7,6 +7,7 @@
 //! only pre-selects the ones that are almost certainly safe.
 
 mod classes;
+mod in_use;
 mod registrations;
 mod shortcuts;
 
@@ -523,6 +524,9 @@ pub struct RemovalResult {
     /// Failed only because the Recycle Bin can't take it, so deleting it
     /// permanently would work.
     too_big_for_recycle_bin: bool,
+    /// Failed only because File Explorer has the app's shell extension
+    /// loaded, so restarting Explorer would free it.
+    held_by_shell: bool,
     error: Option<String>,
 }
 
@@ -678,12 +682,16 @@ enum Refused {
     Denied(&'static str),
     /// Too large for the Recycle Bin on its drive. Deleting permanently works.
     TooBigForRecycleBin(&'static str),
+    /// Programs have its files open. When they're only File Explorer and the
+    /// hosts that load its extensions (`shell`), restarting Explorer frees it.
+    InUse { message: String, shell: bool },
 }
 
 impl std::fmt::Display for Refused {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Refused::Denied(message) | Refused::TooBigForRecycleBin(message) => f.write_str(message),
+            Refused::InUse { message, .. } => f.write_str(message),
         }
     }
 }
@@ -696,6 +704,38 @@ fn was_denied(e: &anyhow::Error) -> bool {
 
 fn was_too_big(e: &anyhow::Error) -> bool {
     matches!(e.downcast_ref::<Refused>(), Some(Refused::TooBigForRecycleBin(_)))
+}
+
+fn held_by_shell(e: &anyhow::Error) -> bool {
+    matches!(e.downcast_ref::<Refused>(), Some(Refused::InUse { shell: true, .. }))
+}
+
+/// Turns failures of files and folders that programs hold open into an
+/// error naming them. Elevation can't help with those, so it's skipped.
+fn explain_in_use(items: &[Leftover], outcomes: &mut [anyhow::Result<()>]) {
+    for (item, outcome) in items.iter().zip(outcomes.iter_mut()) {
+        let Err(e) = outcome else { continue };
+        if !matches!(item.kind, LeftoverKind::Folder | LeftoverKind::File)
+            || was_too_big(e)
+            || e.downcast_ref::<Refused>().is_some_and(|r| matches!(r, Refused::InUse { .. }))
+            || !still_present(item)
+        {
+            continue;
+        }
+        let holders = in_use::holders(Path::new(&item.path));
+        if holders.is_empty() {
+            continue;
+        }
+        let shell = holders.iter().all(|h| h.shell);
+        let message = if shell {
+            "File Explorer still has the app's shell extension loaded, so this is in use.".to_string()
+        } else {
+            let mut names: Vec<&str> = holders.iter().filter(|h| !h.shell).map(|h| h.name.as_str()).collect();
+            names.dedup();
+            format!("In use by {}. Close it, then try again.", names.join(", "))
+        };
+        *outcome = Err(Refused::InUse { message, shell }.into());
+    }
 }
 
 /// The shell reports every failure the same way, so this can't say which.
@@ -909,13 +949,22 @@ fn remove_all(items: &[Leftover], backup_dir: &Path, permanent: bool) -> Vec<any
     let backed_up: Vec<anyhow::Result<()>> = items.iter().map(|item| back_up(item, backup_dir)).collect();
     let mut outcomes: Vec<_> =
         items.iter().zip(backed_up).map(|(item, backup)| backup.and_then(|()| remove_one(item, permanent))).collect();
-    if is_elevated() {
-        return outcomes;
+    // Elevation can't free a file a program has open, so those skip it.
+    explain_in_use(items, &mut outcomes);
+    if !is_elevated() {
+        retry_elevated(items, &mut outcomes, permanent);
+        // The elevated copy can run into the same thing.
+        explain_in_use(items, &mut outcomes);
     }
+    outcomes
+}
+
+/// Retries the machine-wide items Windows refused in an elevated copy of Reclaim.
+fn retry_elevated(items: &[Leftover], outcomes: &mut [anyhow::Result<()>], permanent: bool) {
     let retry: Vec<usize> =
         (0..items.len()).filter(|&i| outcomes[i].as_ref().is_err_and(was_denied) && is_machine_wide(&items[i])).collect();
     if retry.is_empty() {
-        return outcomes;
+        return;
     }
     let elevated = remove_elevated(&retry.iter().map(|&i| &items[i]).collect::<Vec<_>>(), permanent);
     for i in retry {
@@ -938,7 +987,6 @@ fn remove_all(items: &[Leftover], backup_dir: &Path, permanent: bool) -> Vec<any
             })),
         };
     }
-    outcomes
 }
 
 /// Moves files to the Recycle Bin, or deletes them if `permanent`, and
@@ -957,12 +1005,23 @@ pub async fn remove_leftovers(app: AppHandle, items: Vec<Leftover>, permanent: b
                 value_name: item.value_name.clone(),
                 ok: result.is_ok(),
                 too_big_for_recycle_bin: result.as_ref().is_err_and(was_too_big),
+                held_by_shell: result.as_ref().is_err_and(held_by_shell),
                 error: result.err().map(|e| format!("{e:#}")),
             })
             .collect::<Vec<_>>()
     })
     .await?;
     Ok(results)
+}
+
+/// Restarts File Explorer so it lets go of the files under `paths`, which a
+/// removed app's shell extension keeps loaded. Refuses if other programs
+/// hold them too.
+#[tauri::command]
+pub async fn release_from_shell(paths: Vec<String>) -> CmdResult<()> {
+    let paths: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).filter(|p| !paths::is_protected(p)).collect();
+    tauri::async_runtime::spawn_blocking(move || in_use::release_from_shell(&paths)).await??;
+    Ok(())
 }
 
 /// Folder holding backups of removed registry entries, services, and tasks.
@@ -1093,6 +1152,19 @@ mod tests {
             let err = result.expect_err("removal should be refused");
             assert!(was_denied(&err), "permanent={permanent}: {err:#}");
         }
+    }
+
+    #[test]
+    fn says_which_program_holds_a_folder() {
+        let dir = std::env::temp_dir().join(format!("reclaim-held-folder-test-{}", std::process::id()));
+        let held = in_use::HeldOpen::new(&dir.join("held.dat"));
+        // Permanently, so nothing lands in the Recycle Bin if it somehow works.
+        let outcomes = remove_all(&[leftover(LeftoverKind::Folder, &dir)], &std::env::temp_dir(), true);
+        drop(held);
+        let _ = std::fs::remove_dir_all(&dir);
+        let err = outcomes[0].as_ref().expect_err("a folder with a file held open can't be removed");
+        assert!(err.to_string().starts_with("In use by"), "{err:#}");
+        assert!(!held_by_shell(err), "PowerShell isn't File Explorer");
     }
 
     #[test]

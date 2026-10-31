@@ -50,6 +50,7 @@ pub fn run() {
             programs::uninstall::run_uninstaller,
             programs::leftovers::scan_leftovers,
             programs::leftovers::remove_leftovers,
+            programs::leftovers::release_from_shell,
             programs::leftovers::registry_backup_dir,
             storage::start_scan,
             storage::cancel_scan,

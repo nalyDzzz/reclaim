@@ -15,12 +15,20 @@ type Step =
   | { kind: "scanning" }
   | { kind: "review"; leftovers: Leftover[] }
   | { kind: "removing"; permanent: boolean }
+  | { kind: "restartingExplorer" }
   | ({ kind: "done"; failures: Failure[] } & Totals)
   | { kind: "error"; message: string };
 
-/** `tooBig` means only the Recycle Bin refused it, so deleting permanently works. */
-type Failure = { item: Leftover; error: string; tooBig: boolean };
+/**
+ * `tooBig`: only the Recycle Bin refused it, so deleting permanently works.
+ * `heldByShell`: only File Explorer holds it, so restarting Explorer frees it.
+ */
+type Failure = { item: Leftover; error: string; tooBig: boolean; heldByShell: boolean };
 type Totals = { removed: number; recycledBytes: number; deletedBytes: number };
+
+/** What a later pass does about a failure: try again, delete permanently, or restart File Explorer first. */
+type Remedy = "again" | "permanent" | "explorer";
+const remedyFor = (f: Failure): Remedy => (f.tooBig ? "permanent" : f.heldByShell ? "explorer" : "again");
 
 const NO_TOTALS: Totals = { removed: 0, recycledBytes: 0, deletedBytes: 0 };
 
@@ -110,7 +118,9 @@ export function UninstallDialog({
       changed.current = true;
       const failures = items.flatMap((item, i) => {
         const result = results[i];
-        return result?.ok ? [] : [{ item, error: result?.error ?? "Unknown error", tooBig: result?.tooBigForRecycleBin ?? false }];
+        if (result?.ok) return [];
+        const error = result?.error ?? "Unknown error";
+        return [{ item, error, tooBig: result?.tooBigForRecycleBin ?? false, heldByShell: result?.heldByShell ?? false }];
       });
       const freed = items
         .filter((item, i) => results[i]?.ok && (item.kind === "folder" || item.kind === "file"))
@@ -128,16 +138,25 @@ export function UninstallDialog({
     }
   };
 
-  /** Retries the failures the Recycle Bin refused (`permanent`) or the rest. */
-  const retry = (permanent: boolean) => {
+  /** Retries the failures that `remedy` fixes, leaving the rest listed. */
+  const retry = async (remedy: Remedy) => {
     if (step.kind !== "done") return;
-    const again = step.failures.filter((f) => f.tooBig === permanent);
-    const kept = step.failures.filter((f) => f.tooBig !== permanent);
-    removeItems(again.map((f) => f.item), { permanent, before: step, kept });
+    const again = step.failures.filter((f) => remedyFor(f) === remedy);
+    const kept = step.failures.filter((f) => remedyFor(f) !== remedy);
+    if (remedy === "explorer") {
+      setStep({ kind: "restartingExplorer" });
+      try {
+        await api.releaseFromShell(again.map((f) => f.item.path));
+      } catch (e) {
+        toast("Couldn't restart File Explorer", { detail: errorMessage(e), tone: "danger" });
+        return setStep(step);
+      }
+    }
+    removeItems(again.map((f) => f.item), { permanent: remedy === "permanent", before: step, kept });
   };
 
   const close = () => onClose(changed.current);
-  const busy = step.kind === "running" || step.kind === "scanning" || step.kind === "removing";
+  const busy = step.kind === "running" || step.kind === "scanning" || step.kind === "removing" || step.kind === "restartingExplorer";
   const title = (
     <span className="flex items-center gap-3">
       <ProgramIcon id={program.id} name={program.name} size={22} />
@@ -205,6 +224,9 @@ export function UninstallDialog({
           }
         />
       )}
+      {step.kind === "restartingExplorer" && (
+        <Progress label="Restarting File Explorer" detail="Your taskbar and File Explorer windows disappear for a moment, then come back." />
+      )}
       {step.kind === "stillInstalled" && (
         <div className="flex gap-3">
           <TriangleAlert className="mt-0.5 size-4 shrink-0 text-warn" />
@@ -237,7 +259,7 @@ function Footer({
   onClose: () => void;
   onUninstall: () => void;
   onScan: () => void;
-  onRetry: (permanent: boolean) => void;
+  onRetry: (remedy: Remedy) => void;
 }) {
   switch (step.kind) {
     case "confirm":
@@ -270,12 +292,14 @@ function Footer({
     case "error": {
       // The app is gone from the list now, so this is the last chance to clear what's left.
       const failures = step.kind === "done" ? step.failures : [];
+      const needs = (remedy: Remedy) => failures.some((f) => remedyFor(f) === remedy);
       const tooBigBytes = failures.filter((f) => f.tooBig).reduce((sum, f) => sum + f.item.sizeBytes, 0);
       return (
         <>
-          {failures.some((f) => !f.tooBig) && <Button onClick={() => onRetry(false)}>Try again</Button>}
-          {failures.some((f) => f.tooBig) && (
-            <Button variant="danger" onClick={() => onRetry(true)}>
+          {needs("again") && <Button onClick={() => onRetry("again")}>Try again</Button>}
+          {needs("explorer") && <Button onClick={() => onRetry("explorer")}>Restart File Explorer and try again</Button>}
+          {needs("permanent") && (
+            <Button variant="danger" onClick={() => onRetry("permanent")}>
               {tooBigBytes > 0 ? `Delete ${formatBytes(tooBigBytes)} permanently` : "Delete permanently"}
             </Button>
           )}
@@ -348,6 +372,12 @@ function DoneSummary({ step, onEmptyBin }: { step: Extract<Step, { kind: "done" 
           {failures.some((f) => f.tooBig) && (
             <p className="mb-2 text-[12px] text-ink-3">
               The Recycle Bin can't take some of these. Deleting them permanently frees the space now, but they can't be restored.
+            </p>
+          )}
+          {failures.some((f) => f.heldByShell) && (
+            <p className="mb-2 text-[12px] text-ink-3">
+              File Explorer keeps an app's right-click extension loaded until it restarts. Restarting it closes File Explorer windows for a
+              moment; the taskbar comes right back.
             </p>
           )}
           <ul className="flex flex-col gap-1.5">
