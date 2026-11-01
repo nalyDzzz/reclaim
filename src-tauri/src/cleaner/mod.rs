@@ -320,17 +320,20 @@ pub async fn analyze_cleanup(ids: Vec<String>, on_report: Channel<TargetReport>)
     let reports = tauri::async_runtime::spawn_blocking(move || {
         let elevated = is_elevated();
         let running = running_processes();
-        find_targets(&ids)
-            .par_iter()
-            .map(|t| {
-                let report = analyze_target(t, elevated, &running);
-                // Stream each result so the list fills in while slow targets finish.
-                let _ = on_report.send(report.clone());
-                report
-            })
-            .collect::<Vec<_>>()
+        let targets = find_targets(&ids);
+        crate::pool::run_isolated("cleanup", || {
+            targets
+                .par_iter()
+                .map(|t| {
+                    let report = analyze_target(t, elevated, &running);
+                    // Stream each result so the list fills in while slow targets finish.
+                    let _ = on_report.send(report.clone());
+                    report
+                })
+                .collect::<Vec<_>>()
+        })
     })
-    .await?;
+    .await??;
     Ok(reports)
 }
 
@@ -357,29 +360,32 @@ fn analyze_target(t: &Target, elevated: bool, running: &HashSet<String>) -> Targ
 pub async fn run_cleanup(ids: Vec<String>) -> CmdResult<Vec<CleanReport>> {
     let reports = tauri::async_runtime::spawn_blocking(move || {
         let elevated = is_elevated();
-        find_targets(&ids)
-            .into_iter()
-            .filter(|t| !t.requires_admin || elevated)
-            .map(|t| {
-                if t.id == RECYCLE_BIN {
-                    let before = recycle_bin_stats();
-                    let flags = SHERB_NOCONFIRMATION | SHERB_NOPROGRESSUI | SHERB_NOSOUND;
-                    let ok = unsafe { SHEmptyRecycleBinW(None, PCWSTR::null(), flags) }.is_ok();
-                    let after = if ok { DirStats::default() } else { recycle_bin_stats() };
-                    return CleanReport {
-                        id: t.id,
-                        freed_bytes: before.bytes.saturating_sub(after.bytes),
-                        deleted_files: before.files.saturating_sub(after.files),
-                        failed_files: after.files,
-                    };
-                }
-                let cut = cutoff(t);
-                let tally = target_roots(t).iter().map(|root| clean_root(root, cut)).fold(CleanTally::default(), |a, b| a + b);
-                CleanReport { id: t.id, freed_bytes: tally.freed, deleted_files: tally.deleted, failed_files: tally.failed }
-            })
-            .collect::<Vec<_>>()
+        let targets = find_targets(&ids);
+        crate::pool::run_isolated("cleanup", || {
+            targets
+                .into_iter()
+                .filter(|t| !t.requires_admin || elevated)
+                .map(|t| {
+                    if t.id == RECYCLE_BIN {
+                        let before = recycle_bin_stats();
+                        let flags = SHERB_NOCONFIRMATION | SHERB_NOPROGRESSUI | SHERB_NOSOUND;
+                        let ok = unsafe { SHEmptyRecycleBinW(None, PCWSTR::null(), flags) }.is_ok();
+                        let after = if ok { DirStats::default() } else { recycle_bin_stats() };
+                        return CleanReport {
+                            id: t.id,
+                            freed_bytes: before.bytes.saturating_sub(after.bytes),
+                            deleted_files: before.files.saturating_sub(after.files),
+                            failed_files: after.files,
+                        };
+                    }
+                    let cut = cutoff(t);
+                    let tally = target_roots(t).iter().map(|root| clean_root(root, cut)).fold(CleanTally::default(), |a, b| a + b);
+                    CleanReport { id: t.id, freed_bytes: tally.freed, deleted_files: tally.deleted, failed_files: tally.failed }
+                })
+                .collect::<Vec<_>>()
+        })
     })
-    .await?;
+    .await??;
     Ok(reports)
 }
 

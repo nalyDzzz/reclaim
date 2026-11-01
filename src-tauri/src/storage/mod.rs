@@ -93,6 +93,19 @@ struct ScanCtx {
     current: Mutex<String>,
 }
 
+impl ScanCtx {
+    fn new(cancel: Arc<AtomicBool>, current: String) -> Self {
+        ScanCtx {
+            cancel,
+            files: AtomicU64::new(0),
+            dirs: AtomicU64::new(0),
+            bytes: AtomicU64::new(0),
+            errors: AtomicU64::new(0),
+            current: Mutex::new(current),
+        }
+    }
+}
+
 struct RawFile {
     name: Box<str>,
     size: u64,
@@ -156,6 +169,16 @@ fn scan_dir(path: &Path, name: Box<str>, modified: u64, ctx: &ScanCtx) -> RawDir
         dir.files += d.files;
     }
     dir
+}
+
+fn scan_tree(root: PathBuf, ctx: &ScanCtx) -> anyhow::Result<ScanTree> {
+    let started = Instant::now();
+    let modified = fs::metadata(&root).map(|m| m.last_write_time()).unwrap_or(0);
+    let raw = crate::pool::run_isolated("scan", || scan_dir(&root, "".into(), modified, ctx))?;
+    let mut tree = build_tree(root, raw);
+    tree.duration_ms = started.elapsed().as_millis() as u64;
+    tree.errors = ctx.errors.load(Relaxed);
+    Ok(tree)
 }
 
 fn extension_of(name: &str) -> Box<str> {
@@ -376,14 +399,7 @@ pub async fn start_scan(path: String, on_progress: Channel<ScanProgress>, state:
     }
     *state.tree.lock().unwrap() = None; // free the previous scan's memory first
 
-    let ctx = Arc::new(ScanCtx {
-        cancel: cancel.clone(),
-        files: AtomicU64::new(0),
-        dirs: AtomicU64::new(0),
-        bytes: AtomicU64::new(0),
-        errors: AtomicU64::new(0),
-        current: Mutex::new(path.clone()),
-    });
+    let ctx = Arc::new(ScanCtx::new(cancel.clone(), path.clone()));
     let done = Arc::new(AtomicBool::new(false));
 
     let reporter = {
@@ -406,19 +422,10 @@ pub async fn start_scan(path: String, on_progress: Channel<ScanProgress>, state:
 
     let scan_root = root.clone();
     let scan_ctx = ctx.clone();
-    let tree = tauri::async_runtime::spawn_blocking(move || {
-        let started = Instant::now();
-        let modified = fs::metadata(&scan_root).map(|m| m.last_write_time()).unwrap_or(0);
-        let raw = scan_dir(&scan_root, "".into(), modified, &scan_ctx);
-        let mut tree = build_tree(scan_root, raw);
-        tree.duration_ms = started.elapsed().as_millis() as u64;
-        tree.errors = scan_ctx.errors.load(Relaxed);
-        tree
-    })
-    .await;
+    let tree = tauri::async_runtime::spawn_blocking(move || scan_tree(scan_root, &scan_ctx)).await;
     done.store(true, Relaxed);
     let _ = reporter.join();
-    let tree = tree?;
+    let tree = tree??;
 
     let cancelled = cancel.load(Relaxed);
     let root_node = &tree.nodes[0];
@@ -628,16 +635,8 @@ mod tests {
         fs::write(dir.join("a/small.txt"), b"hi").unwrap();
         fs::write(dir.join("root.log"), vec![0u8; 100]).unwrap();
 
-        let ctx = ScanCtx {
-            cancel: Arc::new(AtomicBool::new(false)),
-            files: AtomicU64::new(0),
-            dirs: AtomicU64::new(0),
-            bytes: AtomicU64::new(0),
-            errors: AtomicU64::new(0),
-            current: Mutex::new(String::new()),
-        };
-        let raw = scan_dir(&dir, "".into(), 0, &ctx);
-        let mut tree = build_tree(dir.clone(), raw);
+        let ctx = ScanCtx::new(Arc::new(AtomicBool::new(false)), String::new());
+        let mut tree = scan_tree(dir.clone(), &ctx).unwrap();
         assert_eq!(tree.nodes[0].size, 4096 + 2 + 100);
         assert_eq!(tree.nodes[0].files, 3);
 
@@ -653,5 +652,48 @@ mod tests {
         assert_eq!(tree.nodes[0].files, 1);
         assert_eq!(tree.types.get("bin").unwrap().bytes, 0);
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Cleanup's analysis and the Apps size column run on rayon's shared
+    /// pool. A scan queued there behind them used to sit on its first folder
+    /// until they finished, which looked like a frozen scan.
+    #[test]
+    fn scan_does_not_wait_for_the_shared_pool() {
+        let dir = std::env::temp_dir().join(format!("reclaim-scan-busy-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        for sub in ["a/x", "b/y", "c/z"] {
+            fs::create_dir_all(dir.join(sub)).unwrap();
+            fs::write(dir.join(sub).join("f.bin"), vec![0u8; 10]).unwrap();
+        }
+
+        // Hold every thread in the shared pool until the scan is done.
+        let release = Arc::new(AtomicBool::new(false));
+        let busy = Arc::new(AtomicU64::new(0));
+        let blocker = {
+            let (release, busy) = (release.clone(), busy.clone());
+            std::thread::spawn(move || {
+                rayon::broadcast(|_| {
+                    busy.fetch_add(1, Relaxed);
+                    while !release.load(Relaxed) {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                })
+            })
+        };
+        while busy.load(Relaxed) < rayon::current_num_threads() as u64 {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let root = dir.clone();
+        std::thread::spawn(move || {
+            let ctx = ScanCtx::new(Arc::new(AtomicBool::new(false)), String::new());
+            let _ = tx.send(scan_tree(root, &ctx).map(|tree| tree.nodes[0].files));
+        });
+        let files = rx.recv_timeout(Duration::from_secs(10));
+        release.store(true, Relaxed);
+        blocker.join().unwrap();
+        fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(files.expect("the scan waited on unrelated work in the shared pool").unwrap(), 3);
     }
 }

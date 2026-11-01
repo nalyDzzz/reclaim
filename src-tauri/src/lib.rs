@@ -3,6 +3,7 @@ mod debloat;
 mod error;
 mod launch;
 mod paths;
+mod pool;
 mod programs;
 mod storage;
 mod system;
