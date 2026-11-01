@@ -353,6 +353,15 @@ impl std::ops::Add for DirStats {
 /// Recursively sums file sizes under `path` in parallel. Junctions and
 /// symlinks are not followed so nothing is counted twice.
 pub fn dir_stats(path: &Path) -> DirStats {
+    dir_stats_where(path, &|_| true)
+}
+
+/// Like `dir_stats`, but counts only the files `keep` accepts.
+///
+/// Each file's metadata comes from the folder listing itself, so this makes
+/// no system call per file. The catch is that a file open for writing can
+/// show a stale size or time until it's closed.
+pub fn dir_stats_where(path: &Path, keep: &(impl Fn(&fs::Metadata) -> bool + Sync)) -> DirStats {
     let Ok(entries) = fs::read_dir(path) else { return DirStats::default() };
     let mut stats = DirStats::default();
     let mut subdirs = Vec::new();
@@ -361,17 +370,16 @@ pub fn dir_stats(path: &Path) -> DirStats {
         if meta.file_type().is_symlink() {
             continue;
         }
-        let attrs = meta.file_attributes();
         if meta.is_dir() {
             subdirs.push(entry.path());
-        } else {
+        } else if keep(&meta) {
             stats.files += 1;
-            if !is_cloud_placeholder(attrs) {
+            if !is_cloud_placeholder(meta.file_attributes()) {
                 stats.bytes += meta.len();
             }
         }
     }
-    stats + subdirs.par_iter().map(|d| dir_stats(d)).reduce(DirStats::default, |a, b| a + b)
+    stats + subdirs.par_iter().map(|d| dir_stats_where(d, keep)).reduce(DirStats::default, |a, b| a + b)
 }
 
 /// Size of a file or directory tree.

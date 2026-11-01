@@ -104,22 +104,16 @@ fn old_enough(meta: &fs::Metadata, cutoff: Option<SystemTime>) -> bool {
     }
 }
 
-/// Stats for what cleaning `path` would remove.
+/// Stats for what cleaning `path` would remove. This is only an estimate:
+/// cleaning checks each file again before deleting it.
 fn measure(path: &Path, cutoff: Option<SystemTime>) -> DirStats {
-    let Ok(meta) = fs::symlink_metadata(path) else { return DirStats::default() };
-    if meta.file_type().is_symlink() {
-        return DirStats::default();
+    let cleanable = |meta: &fs::Metadata| old_enough(meta, cutoff) && !is_cloud_placeholder(meta.file_attributes());
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => DirStats::default(),
+        Ok(meta) if meta.is_dir() => paths::dir_stats_where(path, &cleanable),
+        Ok(meta) if cleanable(&meta) => DirStats { bytes: meta.len(), files: 1 },
+        _ => DirStats::default(),
     }
-    if !meta.is_dir() {
-        return if old_enough(&meta, cutoff) && !is_cloud_placeholder(meta.file_attributes()) {
-            DirStats { bytes: meta.len(), files: 1 }
-        } else {
-            DirStats::default()
-        };
-    }
-    let Ok(entries) = fs::read_dir(path) else { return DirStats::default() };
-    let children: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
-    children.par_iter().map(|c| measure(c, cutoff)).reduce(DirStats::default, |a, b| a + b)
 }
 
 // Deletion has to stay safe when Reclaim runs elevated and the folder being
@@ -432,7 +426,11 @@ mod tests {
         assert!(!dir.join("nested").exists());
         // Files newer than the cutoff are kept.
         fs::write(dir.join("fresh.tmp"), vec![1u8; 5]).unwrap();
+        fs::create_dir_all(dir.join("nested")).unwrap();
+        fs::write(dir.join("nested/fresh.tmp"), vec![1u8; 5]).unwrap();
         let hour_ago = Some(SystemTime::now() - Duration::from_secs(3600));
+        assert_eq!(measure(&dir, hour_ago).files, 0);
+        assert_eq!(measure(&dir, None).files, 2);
         assert_eq!(clean_root(&dir, hour_ago).deleted, 0);
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -450,12 +448,14 @@ mod tests {
         fs::create_dir_all(&target).unwrap();
         fs::write(target.join("junk.tmp"), b"junk").unwrap();
         junction(&target.join("link"), &victim);
+        assert_eq!(measure(&target, None).files, 1);
         assert_eq!(clean_root(&target, None).deleted, 1);
         assert!(victim.join("keep.txt").exists());
 
         // A root that is itself a junction is refused.
         let root_link = base.join("root-link");
         junction(&root_link, &victim);
+        assert_eq!(measure(&root_link, None).files, 0);
         assert_eq!(clean_root(&root_link, None).deleted, 0);
         assert!(victim.join("keep.txt").exists());
 
