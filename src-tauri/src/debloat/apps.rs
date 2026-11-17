@@ -1,8 +1,6 @@
 //! Preinstalled Microsoft Store (AppX) apps.
 
-use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use anyhow::Context;
 use base64::Engine;
@@ -13,9 +11,7 @@ use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_64KEY};
 use crate::error::CmdResult;
 use crate::paths::{known, wildcard_match};
 use crate::remembered;
-use crate::system::is_elevated;
-
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+use crate::system::{is_elevated, powershell};
 
 struct Known {
     name: &'static str,
@@ -171,20 +167,6 @@ pub struct AppxApp {
     keeps_copy: bool,
 }
 
-fn powershell(script: &str) -> anyhow::Result<String> {
-    let out = Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .context("Couldn't start PowerShell")?;
-    if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr);
-        let first = err.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("PowerShell reported an error");
-        anyhow::bail!("{first}");
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).to_string())
-}
-
 /// "Microsoft.BingWeather" -> "Bing Weather"
 fn prettify(name: &str) -> String {
     let base = name.split_once('.').map(|(_, rest)| rest).unwrap_or(name).replace('.', " ");
@@ -297,6 +279,21 @@ pub async fn list_appx() -> CmdResult<Vec<AppxApp>> {
     Ok(tauri::async_runtime::spawn_blocking(read_apps).await??)
 }
 
+/// The apps a setup file lists as removed: the ones removed through
+/// Reclaim, and the commonly removed apps this user doesn't have.
+pub fn removed_for_setup(record: &remembered::Remembered) -> anyhow::Result<Vec<String>> {
+    let installed = installed_packages()?;
+    let has = |name: &str| installed.iter().any(|p| p.name.eq_ignore_ascii_case(name));
+    let mut names: Vec<String> = record.removed_apps.iter().filter(|n| !has(n)).cloned().collect();
+    for k in KNOWN_APPS.iter().filter(|k| k.recommended && !has(k.name)) {
+        if !names.iter().any(|n| n.eq_ignore_ascii_case(k.name)) {
+            names.push(k.name.to_string());
+        }
+    }
+    names.sort_by_key(|n| n.to_lowercase());
+    Ok(names)
+}
+
 /// Store apps the user removed that are installed for them again.
 pub fn returned(record: &remembered::Remembered) -> anyhow::Result<Vec<AppxApp>> {
     if record.removed_apps.is_empty() {
@@ -312,7 +309,7 @@ pub fn returned(record: &remembered::Remembered) -> anyhow::Result<Vec<AppxApp>>
     Ok(apps)
 }
 
-fn valid_package_name(name: &str) -> bool {
+pub(super) fn valid_package_name(name: &str) -> bool {
     !name.is_empty() && name.len() < 256 && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '~'))
 }
 

@@ -234,6 +234,31 @@ export interface Tweak {
   signOut: boolean;
 }
 
+export interface Preset {
+  id: string;
+  name: string;
+  description: string;
+  /** Tweaks it turns on; ones this version of Windows lacks are left out. */
+  tweaks: string[];
+  /** Removes the commonly removed Store apps. */
+  removeApps: boolean;
+}
+
+/** A Debloat setup saved to or read from a file. */
+export interface Setup {
+  tweaks: string[];
+  /** Package names of removed Store apps. */
+  apps: string[];
+  /** Tweaks in the file this version of Windows, or of Reclaim, doesn't have. */
+  unknownTweaks: number;
+}
+
+export interface RestorePoint {
+  created: boolean;
+  /** Why there isn't a new one, when there isn't. */
+  note: string | null;
+}
+
 export const api = {
   systemInfo: () => invoke<SystemInfo>("system_info"),
   listDrives: () => invoke<Drive[]>("list_drives"),
@@ -290,6 +315,11 @@ export const api = {
   listTweaks: () => invoke<Tweak[]>("list_tweaks"),
   setTweak: (id: string, enabled: boolean) => invoke<void>("set_tweak", { id, enabled }),
   restartExplorer: () => invoke<void>("restart_explorer"),
+  listPresets: () => invoke<Preset[]>("list_presets"),
+  exportSetup: (path: string) => invoke<Setup>("export_setup", { path }),
+  readSetup: (path: string) => invoke<Setup>("read_setup", { path }),
+  /** Needs administrator rights, and can take a minute. */
+  createRestorePoint: () => invoke<RestorePoint>("create_restore_point"),
   checkDrift: () => invoke<Drift>("check_drift"),
   /** Stops watching these, keeping things as they are now. */
   forgetDrift: (tweaks: string[], apps: string[]) => invoke<void>("forget_drift", { tweaks, apps }),

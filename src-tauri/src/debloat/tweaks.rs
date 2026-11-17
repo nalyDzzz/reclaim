@@ -550,6 +550,22 @@ pub fn list_tweaks() -> Vec<TweakState> {
     available().map(|t| state(t, elevated)).collect()
 }
 
+/// Whether `id` names a tweak this version of Windows has.
+pub fn exists(id: &str) -> bool {
+    available().any(|t| t.id == id)
+}
+
+/// Every tweak's ID, whichever version of Windows has it.
+#[cfg(test)]
+pub fn known_ids() -> Vec<&'static str> {
+    TWEAKS.iter().map(|t| t.id).collect()
+}
+
+/// The IDs of the tweaks that are on.
+pub fn applied_ids() -> Vec<&'static str> {
+    available().filter(|t| is_tweak_applied(t)).map(|t| t.id).collect()
+}
+
 fn was_denied(e: &anyhow::Error) -> bool {
     e.downcast_ref::<std::io::Error>().is_some_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied)
 }

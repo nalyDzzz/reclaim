@@ -1,3 +1,7 @@
+use std::os::windows::process::CommandExt;
+use std::process::Command;
+
+use anyhow::Context;
 use serde::Serialize;
 use tauri::{AppHandle, Manager};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_FAILED};
@@ -8,7 +12,7 @@ use windows::Win32::UI::Shell::{SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELL
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 use windows::core::{HSTRING, PCWSTR};
 use winreg::RegKey;
-use winreg::enums::HKEY_LOCAL_MACHINE;
+use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_64KEY};
 
 use crate::error::CmdResult;
 
@@ -215,4 +219,68 @@ pub fn list_drives() -> Vec<Drive> {
         });
     }
     drives
+}
+
+/// Runs a Windows PowerShell script and returns what it printed, or its
+/// first error line. PowerShell is started by its full path, so an exe of
+/// the same name elsewhere can't stand in for it.
+pub fn powershell(script: &str) -> anyhow::Result<String> {
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let out = Command::new(crate::paths::system32(r"WindowsPowerShell\v1.0\powershell.exe"))
+        .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .context("Couldn't start PowerShell")?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        let first = err.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("PowerShell reported an error");
+        anyhow::bail!("{first}");
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestorePoint {
+    created: bool,
+    /// Why there isn't a new one, when there isn't.
+    note: Option<String>,
+}
+
+/// Whether System Restore protects any drive. Only readable as administrator.
+fn system_restore_on() -> Option<bool> {
+    const VOLUMES: &str = "{09F7EDC5-294E-4180-AF6A-FB0E6A0E9513}";
+    let key = RegKey::predef(HKEY_LOCAL_MACHINE)
+        .open_subkey_with_flags(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\SPP\Clients", KEY_READ | KEY_WOW64_64KEY)
+        .ok()?;
+    Some(key.get_value::<Vec<String>, _>(VOLUMES).is_ok_and(|v| v.iter().any(|s| !s.trim().is_empty())))
+}
+
+/// Has Windows make a restore point, for undoing a batch of changes. Takes
+/// up to a minute. Windows makes at most one a day unless told otherwise,
+/// which counts as covered: restoring the recent one undoes these changes
+/// too.
+#[tauri::command]
+pub async fn create_restore_point() -> CmdResult<RestorePoint> {
+    crate::error::ensure!(is_elevated(), "Making a restore point needs administrator rights.");
+    let point = tauri::async_runtime::spawn_blocking(|| -> anyhow::Result<RestorePoint> {
+        let skipped = |note: &str| RestorePoint { created: false, note: Some(note.to_string()) };
+        if system_restore_on() == Some(false) {
+            return Ok(skipped("System Restore is turned off on this PC, so Windows can't make a restore point."));
+        }
+        let script = r#"
+            $ProgressPreference = 'SilentlyContinue'
+            $before = @(Get-ComputerRestorePoint -ErrorAction SilentlyContinue).Count
+            Checkpoint-Computer -Description 'Before changes made with Reclaim' -RestorePointType MODIFY_SETTINGS -ErrorAction Stop -WarningAction SilentlyContinue -WarningVariable recent
+            $after = @(Get-ComputerRestorePoint -ErrorAction SilentlyContinue).Count
+            if ($after -gt $before) { 'created' } elseif ($recent) { 'recent' } else { 'unknown' }
+        "#;
+        Ok(match powershell(script)?.trim() {
+            "created" => RestorePoint { created: true, note: None },
+            "recent" => skipped("Windows made a restore point in the last 24 hours and makes one a day at most. Restoring that one undoes these changes too."),
+            _ => skipped("Windows didn't say whether it made a restore point."),
+        })
+    })
+    .await??;
+    Ok(point)
 }

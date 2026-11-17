@@ -24,6 +24,8 @@ Installed copies keep themselves up to date from 0.2.0 on: when a new version is
 
 **Debloat.** Remove preinstalled Store apps, with the commonly removed ones flagged and notes on the ones some people need (Xbox, Phone Link…). Run as administrator, Reclaim also removes the copy Windows keeps for new accounts, so feature updates don't put the app back; apps you removed earlier that Windows still keeps a copy of are listed separately. Plus reversible switches for ads and suggestions, Bing in Start, Recall, telemetry, the taskbar (left alignment, search, Widgets, seconds in the clock), File Explorer (This PC, Gallery, the classic right-click menu), gaming (mouse acceleration, the Sticky Keys prompt, Game Bar recording), and Fast Startup. Reclaim remembers what you changed and checks on each start whether Windows turned ads, suggestions, or tracking back on, with one click to redo it.
 
+**Quick setup.** Presets (Essentials, Privacy, Gaming) list every change before they make any, and can make a System Restore point first. Save your setup to a file and load it on another PC to repeat it there.
+
 ## Safety model
 
 - Leftover files go to the **Recycle Bin**, never straight to deletion.

@@ -10,8 +10,10 @@ interface DebloatState {
   /** Changes that came undone; null until the first check finishes. */
   drift: Drift | null;
   driftCount: number;
-  /** Goes up whenever a redo changes settings or apps, so lists showing them reload. */
+  /** Goes up whenever a batch of changes lands, so lists showing settings or apps reload. */
   revision: number;
+  /** Call after changing settings or apps outside a list: reloads the lists and checks for drift again. */
+  afterChanges: (effects: { explorer?: boolean; signIn?: boolean }) => void;
   redoing: boolean;
   redo: () => Promise<void>;
   keepAsIs: () => Promise<void>;
@@ -54,6 +56,16 @@ export function DebloatProvider({ children }: { children: ReactNode }) {
       return null;
     }
   }, []);
+
+  const afterChanges = useCallback(
+    (effects: { explorer?: boolean; signIn?: boolean }) => {
+      if (effects.explorer) setNeedsExplorerRestart(true);
+      if (effects.signIn) setNeedsSignIn(true);
+      setRevision((r) => r + 1);
+      void check();
+    },
+    [check],
+  );
 
   useEffect(() => {
     const timer = window.setTimeout(async () => {
@@ -131,6 +143,7 @@ export function DebloatProvider({ children }: { children: ReactNode }) {
       drift,
       driftCount,
       revision,
+      afterChanges,
       redoing,
       redo,
       keepAsIs,
@@ -141,7 +154,7 @@ export function DebloatProvider({ children }: { children: ReactNode }) {
       needsSignIn,
       setNeedsSignIn,
     }),
-    [drift, driftCount, revision, redoing, redo, keepAsIs, settleTweak, settleApp, needsExplorerRestart, needsSignIn],
+    [drift, driftCount, revision, afterChanges, redoing, redo, keepAsIs, settleTweak, settleApp, needsExplorerRestart, needsSignIn],
   );
   return <DebloatContext.Provider value={value}>{children}</DebloatContext.Provider>;
 }

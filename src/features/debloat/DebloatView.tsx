@@ -5,13 +5,14 @@ import { plural } from "../../lib/format";
 import { useApp } from "../../state/app";
 import { useDebloat } from "../../state/debloat";
 import { Badge, Button, IconButton, PageHeader, Tabs } from "../../components/ui";
+import { QuickSetup } from "./QuickSetup";
 import { StoreApps } from "./StoreApps";
 import { WindowsSettings } from "./WindowsSettings";
 
-type Section = "apps" | "settings";
+type Section = "setup" | "apps" | "settings";
 
 export function DebloatView() {
-  const [section, setSection] = useState<Section>("apps");
+  const [section, setSection] = useState<Section>("setup");
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <PageHeader
@@ -22,6 +23,7 @@ export function DebloatView() {
             value={section}
             onChange={setSection}
             options={[
+              { value: "setup", label: "Quick setup" },
               { value: "apps", label: "Store apps" },
               { value: "settings", label: "Windows settings" },
             ]}
@@ -31,7 +33,7 @@ export function DebloatView() {
       <DriftBanner />
       <ExplorerRestartBanner />
       <SignInBanner />
-      {section === "apps" ? <StoreApps /> : <WindowsSettings />}
+      {section === "setup" ? <QuickSetup /> : section === "apps" ? <StoreApps /> : <WindowsSettings />}
     </div>
   );
 }
