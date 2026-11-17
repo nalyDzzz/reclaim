@@ -68,6 +68,7 @@ pub fn run() {
             cleaner::cleanup_targets,
             cleaner::analyze_cleanup,
             cleaner::run_cleanup,
+            cleaner::undo_cleanup,
             debloat::apps::list_appx,
             debloat::apps::remove_appx,
             debloat::apps::appx_logo,

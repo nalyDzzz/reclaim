@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { CircleCheck, FolderOpen, Info, Lock, RefreshCw, ShieldHalf, Sparkles, TriangleAlert } from "lucide-react";
+import { CircleCheck, FolderOpen, Info, Lock, RefreshCw, RotateCcw, ShieldHalf, Sparkles, TriangleAlert } from "lucide-react";
 import { api, errorMessage, type CleanReport, type CleanupTarget, type TargetReport } from "../../lib/api";
 import { bytesParts, formatBytes, plural } from "../../lib/format";
 import { useApp } from "../../state/app";
@@ -35,6 +35,7 @@ export function CleanupView() {
   const [cleaning, setCleaning] = useState(false);
   const [active, setActive] = useState<Active | null>(null);
   const [confirming, setConfirming] = useState(false);
+  const [undoing, setUndoing] = useState<string | null>(null);
 
   const analyze = useCallback(
     async (list: CleanupTarget[], fresh = false) => {
@@ -113,6 +114,18 @@ export function CleanupView() {
     } finally {
       setActive(null);
       setCleaning(false);
+    }
+  };
+
+  const undo = async (t: CleanupTarget) => {
+    setUndoing(t.id);
+    try {
+      toast(await api.undoCleanup(t.id), { tone: "good" });
+      await analyze(targets);
+    } catch (e) {
+      toast("Couldn't undo that", { detail: errorMessage(e), tone: "danger" });
+    } finally {
+      setUndoing(null);
     }
   };
 
@@ -209,6 +222,8 @@ export function CleanupView() {
                     active={active?.id === t.id ? active : null}
                     checked={selected.has(t.id)}
                     onToggle={(on) => toggle(t.id, on)}
+                    undoing={undoing === t.id}
+                    onUndo={cleaning || analyzing || undoing ? undefined : () => undo(t)}
                   />
                 ))}
               </ul>
@@ -281,6 +296,8 @@ function TargetRow({
   active,
   checked,
   onToggle,
+  undoing,
+  onUndo,
 }: {
   target: CleanupTarget;
   report: TargetReport | undefined;
@@ -289,6 +306,9 @@ function TargetRow({
   active: Active | null;
   checked: boolean;
   onToggle: (on: boolean) => void;
+  undoing: boolean;
+  /** Missing while something else is running. */
+  onUndo?: () => void;
 }) {
   const blocked = report?.blocked;
   // Admin-only locations may be unreadable, so zero there means "unknown".
@@ -319,7 +339,8 @@ function TargetRow({
           )}
         </div>
         <div className="mt-0.5 text-[12.5px] text-ink-3">{t.description}</div>
-        {t.givesUp && <TradeOff text={t.givesUp} />}
+        {/* Once it's done and can be undone, there's nothing left to give up. */}
+        {t.givesUp && !report?.undo && <TradeOff text={t.givesUp} />}
         {report?.note && <Note text={report.note} />}
         {report?.reveal && (
           <Button
@@ -333,6 +354,22 @@ function TargetRow({
             }}
           >
             Open folder
+          </Button>
+        )}
+        {report?.undo && !blocked && (
+          <Button
+            size="sm"
+            variant="ghost"
+            icon={<RotateCcw className="size-3.5" />}
+            className="mt-1 -ml-2.5"
+            busy={undoing}
+            disabled={!onUndo}
+            onClick={(e) => {
+              e.stopPropagation();
+              onUndo?.();
+            }}
+          >
+            {report.undo}
           </Button>
         )}
         {showResult && (

@@ -172,6 +172,8 @@ export interface TargetReport {
   note: string | null;
   /** A folder worth looking through before it's gone. */
   reveal: string | null;
+  /** Label for putting back what an earlier cleanup turned off, via `undoCleanup`. */
+  undo: string | null;
 }
 
 export interface CleanReport {
@@ -325,6 +327,8 @@ export const api = {
     channel.onmessage = onReport;
     return invoke<TargetReport[]>("analyze_cleanup", { ids, fresh, onReport: channel });
   },
+  /** Needs administrator rights. Only targets whose report has `undo` can be undone. Says what changed. */
+  undoCleanup: (id: string) => invoke<string>("undo_cleanup", { id }),
   runCleanup: (ids: string[], onStep: (s: CleanStep) => void) => {
     const channel = new Channel<CleanStep>();
     channel.onmessage = onStep;

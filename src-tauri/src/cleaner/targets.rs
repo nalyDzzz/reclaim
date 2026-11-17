@@ -14,6 +14,8 @@ pub enum Kind {
     PreviousWindows,
     /// Replaced Windows Update components, removed by Windows' own handler.
     UpdateCleanup,
+    /// hiberfil.sys, freed by turning hibernation off.
+    Hibernation,
 }
 
 impl Kind {
@@ -146,6 +148,21 @@ pub const TARGETS: &[Target] = &[
         kind: Kind::UpdateCleanup,
         gives_up: Some(
             "You can't uninstall an update to go back to the version it replaced. Windows removes these on its own about 30 days after an update anyway.",
+        ),
+    },
+    Target {
+        id: "hibernation",
+        name: "Hibernation file",
+        category: "large",
+        description: "hiberfil.sys, where Windows saves what's in memory when the PC hibernates. It takes up a good share of the PC's memory size on the drive. Turning hibernation off deletes it.",
+        patterns: &[],
+        requires_admin: true,
+        default_selected: false,
+        min_age_hours: 0,
+        processes: &[],
+        kind: Kind::Hibernation,
+        gives_up: Some(
+            "You can't hibernate the PC, and Fast Startup turns off with it, so starting up from Shut down takes a little longer. You can turn hibernation back on here.",
         ),
     },
     // System

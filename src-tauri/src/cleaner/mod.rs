@@ -1,6 +1,7 @@
 //! Junk and cache cleanup, in the spirit of BleachBit.
 
 mod handlers;
+mod hibernation;
 mod previous_windows;
 mod targets;
 
@@ -73,6 +74,9 @@ pub struct TargetReport {
     note: Option<String>,
     /// A folder worth looking through before it's gone.
     reveal: Option<String>,
+    /// Says how to put back what an earlier cleanup turned off, when
+    /// `undo_cleanup` can.
+    undo: Option<&'static str>,
 }
 
 impl TargetReport {
@@ -86,6 +90,7 @@ impl TargetReport {
             running: false,
             note: None,
             reveal: None,
+            undo: None,
         }
     }
 }
@@ -393,6 +398,7 @@ fn analyze_target(t: &Target, elevated: bool, fresh: bool, running: &HashSet<Str
             (report.bytes, report.files, report.found) = (stats.bytes, stats.files, true);
         }
         Kind::PreviousWindows => previous_windows::analyze(&mut report, elevated, fresh),
+        Kind::Hibernation => hibernation::analyze(&mut report),
         Kind::UpdateCleanup => {
             // The component store is always there. Only an administrator
             // can ask Windows how much of it can go.
@@ -462,6 +468,13 @@ fn clean_target(t: &Target, elevated: bool, on_step: &Channel<CleanStep>) -> Cle
             report.failed_files = after.files;
         }
         Kind::UpdateCleanup => run_handler(t, elevated, on_step, &mut report),
+        Kind::Hibernation => {
+            let before = hibernation::file_size().unwrap_or(0);
+            match hibernation::set(false) {
+                Ok(()) => report.freed_bytes = before.saturating_sub(hibernation::file_size().unwrap_or(0)),
+                Err(e) => report.error = Some(format!("{e:#}")),
+            }
+        }
         Kind::PreviousWindows => {
             run_handler(t, elevated, on_step, &mut report);
             if report.error.is_none() && !previous_windows::folders().is_empty() {
@@ -470,6 +483,17 @@ fn clean_target(t: &Target, elevated: bool, on_step: &Channel<CleanStep>) -> Cle
         }
     }
     report
+}
+
+/// Puts back what an earlier cleanup turned off, for the targets whose
+/// report offers it, and says what changed. Only hibernation can be, so far.
+#[tauri::command]
+pub async fn undo_cleanup(id: String) -> CmdResult<&'static str> {
+    crate::error::ensure!(is_elevated(), "Needs administrator rights. Restart Reclaim as administrator to change this.");
+    let kind = TARGETS.iter().find(|t| t.id == id).map(|t| t.kind);
+    crate::error::ensure!(kind == Some(Kind::Hibernation), "This cleanup can't be undone.");
+    tauri::async_runtime::spawn_blocking(|| hibernation::set(true)).await??;
+    Ok("Hibernation is on again")
 }
 
 /// Has the target's Windows Disk Cleanup handler free its space, passing on
