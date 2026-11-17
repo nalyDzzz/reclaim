@@ -1,29 +1,33 @@
 //! Junk and cache cleanup, in the spirit of BleachBit.
 
+mod handlers;
+mod previous_windows;
 mod targets;
 
 use std::collections::HashSet;
 use std::fs;
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, SystemTime};
 
 use rayon::prelude::*;
 use serde::Serialize;
 use tauri::ipc::Channel;
 use windows::Win32::Foundation::CloseHandle;
+use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
 };
 use windows::Win32::UI::Shell::{
     SHERB_NOCONFIRMATION, SHERB_NOPROGRESSUI, SHERB_NOSOUND, SHEmptyRecycleBinW, SHQUERYRBINFO, SHQueryRecycleBinW,
 };
-use windows::core::PCWSTR;
+use windows::core::{HSTRING, PCWSTR};
 
 use crate::error::CmdResult;
 use crate::paths::{self, DirStats, is_cloud_placeholder};
 use crate::system::is_elevated;
-use targets::{RECYCLE_BIN, TARGETS, Target};
+use targets::{Kind, TARGETS, Target};
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -34,6 +38,7 @@ pub struct TargetInfo {
     description: &'static str,
     requires_admin: bool,
     default_selected: bool,
+    gives_up: Option<&'static str>,
 }
 
 #[tauri::command]
@@ -47,6 +52,7 @@ pub fn cleanup_targets() -> Vec<TargetInfo> {
             description: t.description,
             requires_admin: t.requires_admin,
             default_selected: t.default_selected,
+            gives_up: t.gives_up,
         })
         .collect()
 }
@@ -63,15 +69,53 @@ pub struct TargetReport {
     blocked: bool,
     /// The app is running, so some files may be locked.
     running: bool,
+    /// More about what's there, worth knowing before cleaning it.
+    note: Option<String>,
+    /// A folder worth looking through before it's gone.
+    reveal: Option<String>,
 }
 
-#[derive(Serialize)]
+impl TargetReport {
+    fn new(t: &Target, elevated: bool) -> Self {
+        TargetReport {
+            id: t.id,
+            bytes: 0,
+            files: 0,
+            found: false,
+            blocked: t.requires_admin && !elevated,
+            running: false,
+            note: None,
+            reveal: None,
+        }
+    }
+}
+
+#[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct CleanReport {
     id: &'static str,
     freed_bytes: u64,
     deleted_files: u64,
     failed_files: u64,
+    /// Why a cleanup that isn't a file-by-file delete stopped or fell short.
+    error: Option<String>,
+}
+
+impl CleanReport {
+    fn new(id: &'static str) -> Self {
+        CleanReport { id, freed_bytes: 0, deleted_files: 0, failed_files: 0, error: None }
+    }
+}
+
+/// Sent as `run_cleanup` works through the targets.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanStep {
+    id: &'static str,
+    /// Set once the target is done. Until then it's being cleaned.
+    report: Option<CleanReport>,
+    /// How far along a long cleanup is, from 0 to 1, when Windows says.
+    progress: Option<f64>,
 }
 
 fn running_processes() -> HashSet<String> {
@@ -332,55 +376,129 @@ pub async fn analyze_cleanup(ids: Vec<String>, on_report: Channel<TargetReport>)
 }
 
 fn analyze_target(t: &Target, elevated: bool, running: &HashSet<String>) -> TargetReport {
-    let (stats, found) = if t.id == RECYCLE_BIN {
-        (recycle_bin_stats(), true)
-    } else {
-        let roots = target_roots(t);
-        let cut = cutoff(t);
-        let stats = roots.par_iter().map(|p| measure(p, cut)).reduce(DirStats::default, |a, b| a + b);
-        (stats, !roots.is_empty())
-    };
-    TargetReport {
-        id: t.id,
-        bytes: stats.bytes,
-        files: stats.files,
-        found,
-        blocked: t.requires_admin && !elevated,
-        running: t.processes.iter().any(|p| running.contains(&p.to_lowercase())),
+    let mut report = TargetReport::new(t, elevated);
+    report.running = t.processes.iter().any(|p| running.contains(&p.to_lowercase()));
+    match t.kind {
+        Kind::Files => {
+            let roots = target_roots(t);
+            let cut = cutoff(t);
+            let stats = roots.par_iter().map(|p| measure(p, cut)).reduce(DirStats::default, |a, b| a + b);
+            (report.bytes, report.files, report.found) = (stats.bytes, stats.files, !roots.is_empty());
+        }
+        Kind::RecycleBin => {
+            let stats = recycle_bin_stats();
+            (report.bytes, report.files, report.found) = (stats.bytes, stats.files, true);
+        }
+        Kind::PreviousWindows => previous_windows::analyze(&mut report, elevated),
     }
+    report
 }
 
 #[tauri::command]
-pub async fn run_cleanup(ids: Vec<String>) -> CmdResult<Vec<CleanReport>> {
+pub async fn run_cleanup(ids: Vec<String>, on_step: Channel<CleanStep>) -> CmdResult<Vec<CleanReport>> {
     let reports = tauri::async_runtime::spawn_blocking(move || {
         let elevated = is_elevated();
-        let targets = find_targets(&ids);
+        let mut targets = find_targets(&ids);
+        targets.retain(|t| !t.requires_admin || elevated);
+        // Files first: they're quick, so their space shows up while Windows
+        // works through the slow ones.
+        targets.sort_by_key(|t| t.kind.handler().is_some());
         crate::pool::run_isolated("cleanup", || {
             targets
                 .into_iter()
-                .filter(|t| !t.requires_admin || elevated)
                 .map(|t| {
-                    if t.id == RECYCLE_BIN {
-                        let before = recycle_bin_stats();
-                        let flags = SHERB_NOCONFIRMATION | SHERB_NOPROGRESSUI | SHERB_NOSOUND;
-                        let ok = unsafe { SHEmptyRecycleBinW(None, PCWSTR::null(), flags) }.is_ok();
-                        let after = if ok { DirStats::default() } else { recycle_bin_stats() };
-                        return CleanReport {
-                            id: t.id,
-                            freed_bytes: before.bytes.saturating_sub(after.bytes),
-                            deleted_files: before.files.saturating_sub(after.files),
-                            failed_files: after.files,
-                        };
-                    }
-                    let cut = cutoff(t);
-                    let tally = target_roots(t).iter().map(|root| clean_root(root, cut)).fold(CleanTally::default(), |a, b| a + b);
-                    CleanReport { id: t.id, freed_bytes: tally.freed, deleted_files: tally.deleted, failed_files: tally.failed }
+                    let _ = on_step.send(CleanStep { id: t.id, report: None, progress: None });
+                    let report = clean_target(t, elevated, &on_step);
+                    let _ = on_step.send(CleanStep { id: t.id, report: Some(report.clone()), progress: None });
+                    report
                 })
                 .collect::<Vec<_>>()
         })
     })
     .await??;
     Ok(reports)
+}
+
+fn clean_target(t: &Target, elevated: bool, on_step: &Channel<CleanStep>) -> CleanReport {
+    let mut report = CleanReport::new(t.id);
+    match t.kind {
+        Kind::Files => {
+            let cut = cutoff(t);
+            let tally = target_roots(t).iter().map(|root| clean_root(root, cut)).fold(CleanTally::default(), |a, b| a + b);
+            (report.freed_bytes, report.deleted_files, report.failed_files) = (tally.freed, tally.deleted, tally.failed);
+        }
+        Kind::RecycleBin => {
+            let before = recycle_bin_stats();
+            let flags = SHERB_NOCONFIRMATION | SHERB_NOPROGRESSUI | SHERB_NOSOUND;
+            let ok = unsafe { SHEmptyRecycleBinW(None, PCWSTR::null(), flags) }.is_ok();
+            let after = if ok { DirStats::default() } else { recycle_bin_stats() };
+            report.freed_bytes = before.bytes.saturating_sub(after.bytes);
+            report.deleted_files = before.files.saturating_sub(after.files);
+            report.failed_files = after.files;
+        }
+        Kind::PreviousWindows => {
+            run_handler(t, elevated, on_step, &mut report);
+            if report.error.is_none() && !previous_windows::folders().is_empty() {
+                report.error = Some("Windows removed only part of it. Restart the PC, then clean again to remove the rest.".into());
+            }
+        }
+    }
+    report
+}
+
+/// Has the target's Windows Disk Cleanup handler free its space, passing on
+/// its progress. Handlers don't say what they deleted, so what they freed is
+/// read from the drive's free space.
+fn run_handler(t: &Target, elevated: bool, on_step: &Channel<CleanStep>, report: &mut CleanReport) {
+    let Some(handler) = t.kind.handler() else { return };
+    let root = system_root();
+    let before = free_space(&root);
+    let (channel, id) = (on_step.clone(), t.id);
+    let last = AtomicU32::new(u32::MAX);
+    let result = handlers::purge(handler, elevated, move |freed, total| {
+        if total == 0 {
+            return;
+        }
+        let percent = (freed.min(total) as f64 / total as f64 * 100.0) as u32;
+        if last.swap(percent, Ordering::Relaxed) != percent {
+            let _ = channel.send(CleanStep { id, report: None, progress: Some(f64::from(percent) / 100.0) });
+        }
+    });
+    report.freed_bytes = free_space(&root).saturating_sub(before);
+    report.error = result.err().map(|e| format!("{e:#}"));
+}
+
+/// The system drive's root, like `C:\`.
+fn system_root() -> PathBuf {
+    let windows = paths::known().windows.to_string_lossy().to_string();
+    PathBuf::from(format!("{}\\", windows.get(..2).unwrap_or("C:")))
+}
+
+fn free_space(root: &Path) -> u64 {
+    let mut free = 0u64;
+    match unsafe { GetDiskFreeSpaceExW(&HSTRING::from(root.as_os_str()), None, None, Some(&mut free)) } {
+        Ok(()) => free,
+        Err(_) => 0,
+    }
+}
+
+/// 1536 -> "1.5 KB", the way the app shows sizes everywhere else.
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    let places = if unit == 0 || value >= 100.0 {
+        0
+    } else if value >= 10.0 {
+        1
+    } else {
+        2
+    };
+    format!("{value:.places$} {}", UNITS[unit])
 }
 
 #[cfg(test)]

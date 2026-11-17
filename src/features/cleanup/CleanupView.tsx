@@ -1,26 +1,39 @@
 import { useCallback, useEffect, useState } from "react";
-import { CircleCheck, Lock, RefreshCw, Sparkles, TriangleAlert } from "lucide-react";
+import { CircleCheck, FolderOpen, Info, Lock, RefreshCw, ShieldHalf, Sparkles, TriangleAlert } from "lucide-react";
 import { api, errorMessage, type CleanReport, type CleanupTarget, type TargetReport } from "../../lib/api";
 import { bytesParts, formatBytes, plural } from "../../lib/format";
 import { useApp } from "../../state/app";
 import { Dialog } from "../../components/Dialog";
+import { relaunchAsAdmin } from "../debloat/admin";
 import { Badge, Button, Checkbox, cx, IconButton, PageHeader, Spinner } from "../../components/ui";
 
-const GROUPS: { id: CleanupTarget["category"]; label: string }[] = [
+const GROUPS: { id: CleanupTarget["category"]; label: string; note?: string }[] = [
+  {
+    id: "large",
+    label: "Bigger cleanups",
+    note: "Each one frees a lot of space and gives something up, so they're chosen one at a time.",
+  },
   { id: "system", label: "Windows" },
   { id: "browsers", label: "Browsers" },
   { id: "apps", label: "Apps" },
   { id: "developer", label: "Developer caches" },
 ];
 
+/** The target being cleaned right now. */
+interface Active {
+  id: string;
+  progress: number | null;
+}
+
 export function CleanupView() {
-  const { addReclaimed, toast } = useApp();
+  const { addReclaimed, toast, system } = useApp();
   const [targets, setTargets] = useState<CleanupTarget[]>([]);
   const [reports, setReports] = useState<Record<string, TargetReport>>({});
   const [results, setResults] = useState<Record<string, CleanReport>>({});
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [analyzing, setAnalyzing] = useState(false);
   const [cleaning, setCleaning] = useState(false);
+  const [active, setActive] = useState<Active | null>(null);
   const [confirming, setConfirming] = useState(false);
 
   const analyze = useCallback(
@@ -59,24 +72,42 @@ export function CleanupView() {
   const chosen = visibleTargets.filter((t) => selected.has(t.id) && isCleanable(t.id));
   const chosenBytes = chosen.reduce((s, t) => s + reports[t.id].bytes, 0);
   const foundBytes = visibleTargets.reduce((s, t) => s + (reports[t.id]?.blocked ? 0 : (reports[t.id]?.bytes ?? 0)), 0);
+  const activeTarget = active && targets.find((t) => t.id === active.id);
 
   const clean = async () => {
     setConfirming(false);
     setCleaning(true);
+    setResults({});
     try {
-      const done = await api.runCleanup(chosen.map((t) => t.id));
-      setResults(Object.fromEntries(done.map((r) => [r.id, r])));
+      const done = await api.runCleanup(
+        chosen.map((t) => t.id),
+        (step) => {
+          if (step.report) {
+            const report = step.report;
+            setResults((all) => ({ ...all, [step.id]: report }));
+            setActive(null);
+          } else {
+            setActive({ id: step.id, progress: step.progress });
+          }
+        },
+      );
       const freed = done.reduce((s, r) => s + r.freedBytes, 0);
       const failed = done.reduce((s, r) => s + r.failedFiles, 0);
+      const stopped = done.filter((r) => r.error);
       addReclaimed(freed);
-      toast(`Freed ${formatBytes(freed)}`, {
-        tone: "good",
-        detail: failed > 0 ? `${plural(failed, "file")} were in use and skipped.` : undefined,
+      const details = [
+        failed > 0 ? `${plural(failed, "file")} were in use and skipped.` : null,
+        ...stopped.map((r) => `${targets.find((t) => t.id === r.id)?.name ?? r.id}: ${r.error}`),
+      ].filter(Boolean);
+      toast(stopped.length > 0 && freed === 0 ? "Cleanup didn't finish" : `Freed ${formatBytes(freed)}`, {
+        tone: stopped.length > 0 ? "warn" : "good",
+        detail: details.length > 0 ? details.join(" ") : undefined,
       });
       await analyze(targets);
     } catch (e) {
       toast("Cleanup stopped", { detail: errorMessage(e), tone: "danger" });
     } finally {
+      setActive(null);
       setCleaning(false);
     }
   };
@@ -90,12 +121,13 @@ export function CleanupView() {
     });
 
   const { value, unit } = bytesParts(chosenBytes);
+  const chosenTradeOffs = chosen.filter((t) => t.givesUp);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <PageHeader
         title="Cleanup"
-        meta="Temporary files and caches that apps and Windows rebuild on their own."
+        meta="Temporary files and caches that apps and Windows rebuild on their own, and bigger cleanups you choose yourself."
         actions={
           <IconButton label="Check again" onClick={() => analyze(targets)} disabled={analyzing || cleaning}>
             <RefreshCw className={cx("size-4", analyzing && "animate-spin")} />
@@ -109,8 +141,12 @@ export function CleanupView() {
             <span className="display text-[34px] leading-none text-ink tabular-nums">{value}</span>
             <span className="text-[15px] text-ink-2">{unit} selected</span>
           </div>
-          <div className="mt-1.5 text-[12.5px] text-ink-3">
-            {analyzing ? "Checking caches and temp folders…" : `${formatBytes(foundBytes)} found across ${plural(visibleTargets.length, "location")}`}
+          <div className="mt-1.5 truncate text-[12.5px] text-ink-3">
+            {cleaning && activeTarget
+              ? `Cleaning ${activeTarget.name}${active?.progress != null ? `, ${Math.round(active.progress * 100)}%` : ""}…`
+              : analyzing
+                ? "Checking caches and temp folders…"
+                : `${formatBytes(foundBytes)} found across ${plural(visibleTargets.length, "location")}`}
           </div>
         </div>
         <Button
@@ -131,17 +167,30 @@ export function CleanupView() {
           const selectable = items.filter((t) => isCleanable(t.id));
           const all = selectable.length > 0 && selectable.every((t) => selected.has(t.id));
           const some = selectable.some((t) => selected.has(t.id));
+          // Each bigger cleanup gives something up, so there's no "select all".
+          const pickOneByOne = g.id === "large";
+          const needsAdmin = !system?.elevated && items.some((t) => reports[t.id]?.blocked);
           return (
             <section key={g.id} className="mb-5">
-              <header className="mb-1 flex items-center gap-3 px-3 py-1.5">
-                <Checkbox
-                  label={`Select all ${g.label}`}
-                  checked={all}
-                  indeterminate={!all && some}
-                  disabled={selectable.length === 0}
-                  onChange={(on) => selectable.forEach((t) => toggle(t.id, on))}
-                />
-                <h2 className="text-[12px] font-semibold tracking-[0.1em] text-ink-3 uppercase">{g.label}</h2>
+              <header className="mb-1 flex items-start gap-3 px-3 py-1.5">
+                {!pickOneByOne && (
+                  <Checkbox
+                    label={`Select all ${g.label}`}
+                    checked={all}
+                    indeterminate={!all && some}
+                    disabled={selectable.length === 0}
+                    onChange={(on) => selectable.forEach((t) => toggle(t.id, on))}
+                  />
+                )}
+                <div className="min-w-0 flex-1">
+                  <h2 className="text-[12px] font-semibold tracking-[0.1em] text-ink-3 uppercase">{g.label}</h2>
+                  {g.note && <p className="mt-0.5 text-[12.5px] text-ink-3">{g.note}</p>}
+                </div>
+                {pickOneByOne && needsAdmin && (
+                  <Button size="sm" icon={<ShieldHalf className="size-3.5 text-warn" />} onClick={() => relaunchAsAdmin(toast)}>
+                    Restart as administrator
+                  </Button>
+                )}
               </header>
               <ul className="overflow-hidden rounded-lg border border-line">
                 {items.map((t) => (
@@ -151,6 +200,7 @@ export function CleanupView() {
                     report={reports[t.id]}
                     result={results[t.id]}
                     analyzing={analyzing}
+                    active={active?.id === t.id ? active : null}
                     checked={selected.has(t.id)}
                     onToggle={(on) => toggle(t.id, on)}
                   />
@@ -176,12 +226,20 @@ export function CleanupView() {
             </>
           }
         >
-          <p className="mb-3">These files are deleted permanently. Files that are in use are skipped.</p>
+          <p className="mb-3">
+            {chosenTradeOffs.length > 0
+              ? "Nothing here can be brought back afterward. Files that are in use are skipped."
+              : "These files are deleted permanently. Files that are in use are skipped."}
+          </p>
           <ul className="flex flex-col divide-y divide-line rounded-lg border border-line">
             {chosen.map((t) => (
-              <li key={t.id} className="flex items-center justify-between gap-3 px-3 py-2">
-                <span className="text-ink">{t.name}</span>
-                <span className="num text-[12.5px] text-ink-2">{formatBytes(reports[t.id].bytes)}</span>
+              <li key={t.id} className="px-3 py-2">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-ink">{t.name}</span>
+                  <span className="num text-[12.5px] text-ink-2">{formatBytes(reports[t.id].bytes)}</span>
+                </div>
+                {t.givesUp && <TradeOff text={t.givesUp} />}
+                {t.givesUp && reports[t.id].note && <Note text={reports[t.id].note!} />}
               </li>
             ))}
           </ul>
@@ -191,11 +249,30 @@ export function CleanupView() {
   );
 }
 
+function TradeOff({ text }: { text: string }) {
+  return (
+    <div className="mt-1.5 flex items-start gap-1.5 text-[12px] text-ink-2">
+      <TriangleAlert className="mt-px size-3.5 shrink-0 text-warn" />
+      <span>{text}</span>
+    </div>
+  );
+}
+
+function Note({ text }: { text: string }) {
+  return (
+    <div className="mt-1.5 flex items-start gap-1.5 text-[12px] text-ink-2">
+      <Info className="mt-px size-3.5 shrink-0 text-ink-3" />
+      <span>{text}</span>
+    </div>
+  );
+}
+
 function TargetRow({
   target: t,
   report,
   result,
   analyzing,
+  active,
   checked,
   onToggle,
 }: {
@@ -203,6 +280,7 @@ function TargetRow({
   report: TargetReport | undefined;
   result: CleanReport | undefined;
   analyzing: boolean;
+  active: Active | null;
   checked: boolean;
   onToggle: (on: boolean) => void;
 }) {
@@ -210,6 +288,7 @@ function TargetRow({
   // Admin-only locations may be unreadable, so zero there means "unknown".
   const empty = report && report.bytes === 0 && !blocked;
   const disabled = !report || blocked || empty;
+  const showResult = result && (result.freedBytes > 0 || result.failedFiles > 0 || result.error);
   return (
     <li
       onClick={() => !disabled && onToggle(!checked)}
@@ -234,16 +313,47 @@ function TargetRow({
           )}
         </div>
         <div className="mt-0.5 text-[12.5px] text-ink-3">{t.description}</div>
-        {result && (result.freedBytes > 0 || result.failedFiles > 0) && (
-          <div className="mt-1.5 flex items-center gap-2 text-[12px]">
-            <CircleCheck className="size-3.5 text-good" />
-            <span className="text-ink-2">Freed {formatBytes(result.freedBytes)}</span>
-            {result.failedFiles > 0 && <span className="text-ink-3">· {plural(result.failedFiles, "file")} in use, skipped</span>}
+        {t.givesUp && <TradeOff text={t.givesUp} />}
+        {report?.note && <Note text={report.note} />}
+        {report?.reveal && (
+          <Button
+            size="sm"
+            variant="ghost"
+            icon={<FolderOpen className="size-3.5" />}
+            className="mt-1 -ml-2.5"
+            onClick={(e) => {
+              e.stopPropagation();
+              api.openPath(report.reveal!).catch(() => api.revealPath(report.reveal!));
+            }}
+          >
+            Open folder
+          </Button>
+        )}
+        {showResult && (
+          <div className="mt-1.5 flex items-start gap-2 text-[12px]">
+            {result.error ? (
+              <TriangleAlert className="mt-px size-3.5 shrink-0 text-warn" />
+            ) : (
+              <CircleCheck className="mt-px size-3.5 shrink-0 text-good" />
+            )}
+            <span className="text-ink-2">
+              {result.freedBytes > 0 && `Freed ${formatBytes(result.freedBytes)}`}
+              {result.freedBytes > 0 && (result.failedFiles > 0 || result.error) && " · "}
+              {result.failedFiles > 0 && <span className="text-ink-3">{plural(result.failedFiles, "file")} in use, skipped</span>}
+              {result.error}
+            </span>
           </div>
         )}
       </div>
       <div className="flex min-w-[88px] flex-col items-end pt-0.5">
-        {!report && analyzing ? (
+        {active ? (
+          <>
+            <Spinner className="size-3.5 text-uv-300" />
+            <span className="num mt-1 text-[11px] text-ink-3">
+              {active.progress != null ? `${Math.round(active.progress * 100)}%` : "Cleaning"}
+            </span>
+          </>
+        ) : !report && analyzing ? (
           <Spinner className="size-3.5" />
         ) : empty ? (
           <span className="text-[12px] text-ink-3">Nothing to clean</span>
@@ -252,7 +362,7 @@ function TargetRow({
         ) : report ? (
           <>
             <span className={cx("num text-[13px]", blocked ? "text-ink-3" : "text-ink")}>{formatBytes(report.bytes)}</span>
-            <span className="num text-[11px] text-ink-3">{plural(report.files, "file")}</span>
+            {report.files > 0 && <span className="num text-[11px] text-ink-3">{plural(report.files, "file")}</span>}
           </>
         ) : null}
       </div>

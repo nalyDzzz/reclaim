@@ -152,10 +152,13 @@ export interface TypeStat {
 export interface CleanupTarget {
   id: string;
   name: string;
-  category: "system" | "browsers" | "apps" | "developer";
+  /** "large" holds the bigger cleanups, each of which gives something up. */
+  category: "large" | "system" | "browsers" | "apps" | "developer";
   description: string;
   requiresAdmin: boolean;
   defaultSelected: boolean;
+  /** What cleaning it gives up, said before anything happens. */
+  givesUp: string | null;
 }
 
 export interface TargetReport {
@@ -165,6 +168,10 @@ export interface TargetReport {
   found: boolean;
   blocked: boolean;
   running: boolean;
+  /** More about what's there, worth knowing before cleaning it. */
+  note: string | null;
+  /** A folder worth looking through before it's gone. */
+  reveal: string | null;
 }
 
 export interface CleanReport {
@@ -172,6 +179,17 @@ export interface CleanReport {
   freedBytes: number;
   deletedFiles: number;
   failedFiles: number;
+  /** Why a cleanup that isn't a file-by-file delete stopped or fell short. */
+  error: string | null;
+}
+
+/** Sent while `runCleanup` works through the targets. */
+export interface CleanStep {
+  id: string;
+  /** Set once the target is done. Until then it's being cleaned. */
+  report: CleanReport | null;
+  /** How far along a long cleanup is, from 0 to 1, when Windows says. */
+  progress: number | null;
 }
 
 export interface AppxApp {
@@ -306,7 +324,11 @@ export const api = {
     channel.onmessage = onReport;
     return invoke<TargetReport[]>("analyze_cleanup", { ids, onReport: channel });
   },
-  runCleanup: (ids: string[]) => invoke<CleanReport[]>("run_cleanup", { ids }),
+  runCleanup: (ids: string[], onStep: (s: CleanStep) => void) => {
+    const channel = new Channel<CleanStep>();
+    channel.onmessage = onStep;
+    return invoke<CleanReport[]>("run_cleanup", { ids, onStep: channel });
+  },
 
   listAppx: () => invoke<AppxApp[]>("list_appx"),
   /** Removes the app for this user and, as administrator, Windows' copy too. Pass no full name for a copy-only app. */

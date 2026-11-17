@@ -2876,6 +2876,7 @@ dependencies = [
  "tauri-plugin-updater",
  "trash",
  "windows",
+ "windows-core",
  "winreg",
 ]
 

@@ -20,6 +20,8 @@ Installed copies keep themselves up to date from 0.2.0 on: when a new version is
 
 **Cleanup.** Temp folders, Windows Update downloads, Delivery Optimization, error reports, crash dumps, browser caches (Chrome, Edge, Brave, Vivaldi, Opera, Firefox), app caches (Discord, Slack, VS Code, Cursor, Spotify, Steam), and developer caches (npm, pnpm, Yarn, Bun, pip/uv, Cargo, NuGet, Gradle, Maven, Go). It warns when an app is open and holding its cache.
 
+Bigger cleanups are listed separately and never chosen for you, since each one gives something up and says what before anything happens. Windows.old, the previous Windows that an upgrade keeps so you can go back, is removed by Windows' own cleanup handler, the same one Settings uses, and Reclaim says when the old accounts' folders in it still hold files.
+
 **Startup.** Everything that starts with Windows in one list: the apps Task Manager shows, plus the scheduled tasks that run at sign-in or boot and the services your installed apps start automatically, which it doesn't. Apps use Task Manager's own switch, so the two always agree; tasks are disabled; services are set to start manually, so their app can still start them. Entries whose program is gone are flagged. Nothing is deleted.
 
 **Debloat.** Remove preinstalled Store apps, Widgets included, with the commonly removed ones flagged and notes on the ones some people need (Xbox, Phone Link…). Run as administrator, Reclaim also removes the copy Windows keeps for new accounts, so feature updates don't put the app back; apps you removed earlier that Windows still keeps a copy of are listed separately. Plus reversible switches for ads and suggestions, Bing in Start, Recall, telemetry, the taskbar (left alignment, search, Task View, seconds in the clock), File Explorer (This PC, Gallery, the classic right-click menu), gaming (mouse acceleration, the Sticky Keys prompt, Game Bar recording), and Fast Startup. Reclaim remembers what you changed and checks on each start whether Windows turned ads, suggestions, or tracking back on, with one click to redo it.
@@ -33,6 +35,7 @@ Installed copies keep themselves up to date from 0.2.0 on: when a new version is
 - A protected-path list (`src-tauri/src/paths.rs`) blocks deletion of drive roots, Windows, Program Files itself, user profile folders, and other shared locations, no matter what the UI asks for. Registry removals have an equivalent guard (`is_protected_reg_key`).
 - A folder is only treated as an app's own if its path contains a distinctive word from the app or publisher name. That keeps shared folders like Steam's icon cache from being picked up as leftovers.
 - Commands that run uninstallers re-read the uninstall command from the registry instead of trusting the UI.
+- Cleanup's bigger items that delete system files (Windows.old) are left to Windows' own Disk Cleanup handlers, loaded from System32 by name, so an elevated Reclaim never takes a COM class from a registration the user could change.
 - Reclaim runs without admin rights by default. System-wide cleanup and HKLM leftovers ask you to restart it as administrator.
 
 ## Stack

@@ -1,6 +1,28 @@
-//! Everything the Cleanup screen knows how to clear. Each pattern matches a
-//! folder whose *contents* are removed (the folder itself stays) or a file.
-//! `%VAR%` expands from the environment and `*` matches one path segment.
+//! Everything the Cleanup screen knows how to clear. Most targets are
+//! files: each pattern matches a folder whose *contents* are removed (the
+//! folder itself stays) or a file. `%VAR%` expands from the environment and
+//! `*` matches one path segment. The rest are cleared some other way, which
+//! their `kind` says.
+
+use super::handlers::{self, Handler};
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Files,
+    RecycleBin,
+    /// Windows.old, removed by Windows' own Disk Cleanup handler.
+    PreviousWindows,
+}
+
+impl Kind {
+    /// The Windows Disk Cleanup handler that does the work, if one does.
+    pub fn handler(self) -> Option<Handler> {
+        match self {
+            Kind::PreviousWindows => Some(handlers::PREVIOUS_INSTALLATIONS),
+            _ => None,
+        }
+    }
+}
 
 pub struct Target {
     pub id: &'static str,
@@ -14,9 +36,11 @@ pub struct Target {
     pub min_age_hours: u64,
     /// Executables that lock these files while running.
     pub processes: &'static [&'static str],
+    pub kind: Kind,
+    /// What cleaning this gives up, shown before anything happens. Only the
+    /// bigger cleanups have one; caches cost nothing but a rebuild.
+    pub gives_up: Option<&'static str>,
 }
-
-pub const RECYCLE_BIN: &str = "recycle-bin";
 
 macro_rules! chromium {
     ($id:literal, $name:literal, $base:literal, $exe:literal) => {
@@ -40,6 +64,8 @@ macro_rules! chromium {
             default_selected: true,
             min_age_hours: 0,
             processes: &[$exe],
+            kind: Kind::Files,
+            gives_up: None,
         }
     };
 }
@@ -63,6 +89,8 @@ macro_rules! electron {
             default_selected: true,
             min_age_hours: 0,
             processes: &[$exe],
+            kind: Kind::Files,
+            gives_up: None,
         }
     };
 }
@@ -79,11 +107,29 @@ macro_rules! dev_cache {
             default_selected: false,
             min_age_hours: 0,
             processes: &[],
+            kind: Kind::Files,
+            gives_up: None,
         }
     };
 }
 
 pub const TARGETS: &[Target] = &[
+    // Bigger cleanups. Each is chosen on its own, never by default.
+    Target {
+        id: "windows-old",
+        name: "Previous version of Windows",
+        category: "large",
+        description: "The Windows.old folder, the copy of your old Windows that an upgrade keeps so you can go back. Windows' own cleanup removes it, the same as Settings does.",
+        patterns: &[],
+        requires_admin: true,
+        default_selected: false,
+        min_age_hours: 0,
+        processes: &[],
+        kind: Kind::PreviousWindows,
+        gives_up: Some(
+            "You can't go back to your previous version of Windows from Settings anymore. Anything still in Windows.old is deleted with it.",
+        ),
+    },
     // System
     Target {
         id: "user-temp",
@@ -95,6 +141,8 @@ pub const TARGETS: &[Target] = &[
         default_selected: true,
         min_age_hours: 24,
         processes: &[],
+        kind: Kind::Files,
+        gives_up: None,
     },
     Target {
         id: "windows-temp",
@@ -106,9 +154,11 @@ pub const TARGETS: &[Target] = &[
         default_selected: true,
         min_age_hours: 24,
         processes: &[],
+        kind: Kind::Files,
+        gives_up: None,
     },
     Target {
-        id: RECYCLE_BIN,
+        id: "recycle-bin",
         name: "Recycle Bin",
         category: "system",
         description: "Permanently deletes everything in the Recycle Bin on every drive.",
@@ -117,6 +167,8 @@ pub const TARGETS: &[Target] = &[
         default_selected: false,
         min_age_hours: 0,
         processes: &[],
+        kind: Kind::RecycleBin,
+        gives_up: None,
     },
     Target {
         id: "windows-update",
@@ -128,6 +180,8 @@ pub const TARGETS: &[Target] = &[
         default_selected: true,
         min_age_hours: 24,
         processes: &[],
+        kind: Kind::Files,
+        gives_up: None,
     },
     Target {
         id: "delivery-optimization",
@@ -139,6 +193,8 @@ pub const TARGETS: &[Target] = &[
         default_selected: true,
         min_age_hours: 0,
         processes: &[],
+        kind: Kind::Files,
+        gives_up: None,
     },
     Target {
         id: "error-reports",
@@ -155,6 +211,8 @@ pub const TARGETS: &[Target] = &[
         default_selected: true,
         min_age_hours: 0,
         processes: &[],
+        kind: Kind::Files,
+        gives_up: None,
     },
     Target {
         id: "crash-dumps",
@@ -166,6 +224,8 @@ pub const TARGETS: &[Target] = &[
         default_selected: true,
         min_age_hours: 0,
         processes: &[],
+        kind: Kind::Files,
+        gives_up: None,
     },
     Target {
         id: "system-crash-dumps",
@@ -177,6 +237,8 @@ pub const TARGETS: &[Target] = &[
         default_selected: true,
         min_age_hours: 0,
         processes: &[],
+        kind: Kind::Files,
+        gives_up: None,
     },
     Target {
         id: "thumbnail-cache",
@@ -188,6 +250,8 @@ pub const TARGETS: &[Target] = &[
         default_selected: false,
         min_age_hours: 0,
         processes: &["explorer.exe"],
+        kind: Kind::Files,
+        gives_up: None,
     },
     Target {
         id: "shader-cache",
@@ -205,6 +269,8 @@ pub const TARGETS: &[Target] = &[
         default_selected: false,
         min_age_hours: 0,
         processes: &[],
+        kind: Kind::Files,
+        gives_up: None,
     },
     // Browsers
     chromium!("chrome", "Google Chrome", r"%LOCALAPPDATA%\Google\Chrome\User Data", "chrome.exe"),
@@ -226,6 +292,8 @@ pub const TARGETS: &[Target] = &[
         default_selected: true,
         min_age_hours: 0,
         processes: &["opera.exe"],
+        kind: Kind::Files,
+        gives_up: None,
     },
     Target {
         id: "firefox",
@@ -237,6 +305,8 @@ pub const TARGETS: &[Target] = &[
         default_selected: true,
         min_age_hours: 0,
         processes: &["firefox.exe"],
+        kind: Kind::Files,
+        gives_up: None,
     },
     // Apps
     electron!("discord", "Discord", r"%APPDATA%\discord", "Discord.exe"),
@@ -253,6 +323,8 @@ pub const TARGETS: &[Target] = &[
         default_selected: true,
         min_age_hours: 0,
         processes: &["Spotify.exe"],
+        kind: Kind::Files,
+        gives_up: None,
     },
     Target {
         id: "steam",
@@ -264,6 +336,8 @@ pub const TARGETS: &[Target] = &[
         default_selected: true,
         min_age_hours: 0,
         processes: &["steam.exe", "steamwebhelper.exe"],
+        kind: Kind::Files,
+        gives_up: None,
     },
     // Developer
     dev_cache!(
