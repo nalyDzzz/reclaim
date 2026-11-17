@@ -84,6 +84,12 @@ const KNOWN_APPS: &[Known] = &[
     k("Microsoft.BingHealthAndFitness", "Health & Fitness", true, None),
     k("Microsoft.News", "News", true, None),
     k("Microsoft.StartExperiencesApp", "Start Experiences (Widgets content)", false, None),
+    k(
+        "MicrosoftWindows.Client.WebExperience",
+        "Widgets",
+        false,
+        Some("The Widgets board and its news feed. To only hide the button, use Settings › Personalization › Taskbar"),
+    ),
     k("SpotifyAB.SpotifyMusic", "Spotify", true, Some("Preinstalled promo copy")),
     k("Disney.37853FC22B2CE", "Disney+", true, Some("Preinstalled promo")),
     k("AmazonVideo.PrimeVideo", "Prime Video", true, Some("Preinstalled promo")),

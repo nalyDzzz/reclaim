@@ -37,6 +37,17 @@ pub fn is_elevated() -> bool {
     }
 }
 
+/// Why Windows refused a change. Without administrator rights that's the
+/// reason. With them, Windows itself is guarding the setting: it protects
+/// a few, like default apps and Widgets, from every app, elevated or not.
+pub fn refusal() -> anyhow::Error {
+    if is_elevated() {
+        anyhow::anyhow!("Windows blocked this change. It protects some of its settings from apps.")
+    } else {
+        anyhow::anyhow!("Needs administrator rights. Restart Reclaim as administrator to change this.")
+    }
+}
+
 pub fn os_build() -> u32 {
     RegKey::predef(HKEY_LOCAL_MACHINE)
         .open_subkey(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion")

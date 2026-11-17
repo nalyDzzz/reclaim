@@ -265,11 +265,7 @@ fn set_approved(all_users: bool, list: &str, name: &str, enabled: bool) -> anyho
 }
 
 fn denied(e: std::io::Error) -> anyhow::Error {
-    if e.kind() == std::io::ErrorKind::PermissionDenied {
-        anyhow::anyhow!("Needs administrator rights. Restart Reclaim as administrator to change this.")
-    } else {
-        e.into()
-    }
+    if e.kind() == std::io::ErrorKind::PermissionDenied { crate::system::refusal() } else { e.into() }
 }
 
 fn run_key_items(elevated: bool) -> Vec<StartupItem> {
@@ -481,9 +477,7 @@ fn set_task(path: &str, enabled: bool) -> anyhow::Result<()> {
             .and_then(|t| t.SetEnabled(if enabled { VARIANT_TRUE } else { VARIANT_FALSE }))
     };
     match result {
-        Err(e) if e.code() == ERROR_ACCESS_DENIED.to_hresult() => {
-            anyhow::bail!("Needs administrator rights. Restart Reclaim as administrator to change this.")
-        }
+        Err(e) if e.code() == ERROR_ACCESS_DENIED.to_hresult() => Err(crate::system::refusal()),
         result => Ok(result?),
     }
 }
@@ -584,9 +578,7 @@ fn set_service(name: &str, enabled: bool) -> anyhow::Result<()> {
         let scm = ServiceHandle(OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_CONNECT)?);
         let service = match OpenServiceW(scm.0, &HSTRING::from(name), SERVICE_CHANGE_CONFIG) {
             Ok(handle) => ServiceHandle(handle),
-            Err(e) if e.code() == ERROR_ACCESS_DENIED.to_hresult() => {
-                anyhow::bail!("Needs administrator rights. Restart Reclaim as administrator to change this.")
-            }
+            Err(e) if e.code() == ERROR_ACCESS_DENIED.to_hresult() => return Err(crate::system::refusal()),
             Err(e) => return Err(e.into()),
         };
         ChangeServiceConfigW(

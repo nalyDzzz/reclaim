@@ -300,17 +300,6 @@ const TWEAKS: &[Tweak] = &[
         writes: &[w(User, ADVANCED, "ShowTaskViewButton", Dword(0), Revert::Set(Dword(1)))],
     },
     Tweak {
-        // Windows guards the taskbar button's own value against apps, so this uses the policy.
-        id: "widgets-off",
-        name: "Turn off Widgets",
-        description: "Removes the Widgets button and board, along with the news feed in them.",
-        category: "taskbar",
-        restart_explorer: true,
-        sign_out: false,
-        min_build: WINDOWS_11,
-        writes: &[w(Machine, r"SOFTWARE\Policies\Microsoft\Dsh", "AllowNewsAndInterests", Dword(0), Revert::DeleteValue)],
-    },
-    Tweak {
         id: "taskbar-never-combine",
         name: "Never combine taskbar buttons",
         description: "Shows each window as its own button with its title, instead of one icon per app.",
@@ -438,7 +427,7 @@ const TWEAKS: &[Tweak] = &[
 /// are left out, since people change those in Windows' own settings too,
 /// and that isn't Windows undoing anything.
 fn watched(tweak: &Tweak) -> bool {
-    matches!(tweak.category, "privacy" | "start") || matches!(tweak.id, "classic-context-menu" | "widgets-off")
+    matches!(tweak.category, "privacy" | "start") || tweak.id == "classic-context-menu"
 }
 
 fn supported(tweak: &Tweak, build: u32) -> bool {
@@ -586,12 +575,7 @@ pub fn change(id: &str, enabled: bool) -> anyhow::Result<()> {
     crate::error::ensure!(supported(tweak, os_build()), "This setting isn't in your version of Windows.");
     for write in tweak.writes {
         let result = if enabled { apply(write) } else { revert(write) };
-        result.map_err(|e| match write.hive {
-            Hive::Machine => anyhow::anyhow!("Needs administrator rights. Restart Reclaim as administrator to change this. ({e})"),
-            // Windows guards a few of its own settings against apps changing them.
-            Hive::User if was_denied(&e) => anyhow::anyhow!("Windows blocked this change. It protects some settings from apps. ({e})"),
-            Hive::User => e,
-        })?;
+        result.map_err(|e| if was_denied(&e) { crate::system::refusal() } else { e })?;
     }
     // A policy or Windows' own protection can quietly put a value back.
     crate::error::ensure!(!enabled || is_tweak_applied(tweak), "Windows didn't keep this change. A policy on this PC may be setting it.");
@@ -656,7 +640,7 @@ mod tests {
     #[test]
     fn watches_what_windows_turns_back_on() {
         let tweak = |id: &str| TWEAKS.iter().find(|t| t.id == id).unwrap();
-        assert!(watched(tweak("tips")) && watched(tweak("telemetry")) && watched(tweak("widgets-off")));
+        assert!(watched(tweak("tips")) && watched(tweak("telemetry")) && watched(tweak("classic-context-menu")));
         assert!(!watched(tweak("hidden-files")) && !watched(tweak("taskbar-left")) && !watched(tweak("mouse-acceleration")));
     }
 
