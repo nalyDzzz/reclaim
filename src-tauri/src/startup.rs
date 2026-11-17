@@ -15,7 +15,7 @@ use anyhow::Context;
 use base64::Engine;
 use serde::Serialize;
 use windows::Win32::Foundation::{ERROR_ACCESS_DENIED, VARIANT_FALSE, VARIANT_TRUE};
-use windows::Win32::Storage::FileSystem::{GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW};
+use windows::Win32::Storage::FileSystem::{GetDriveTypeW, GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW};
 use windows::Win32::System::Services::{
     ChangeServiceConfigW, CloseServiceHandle, ENUM_SERVICE_TYPE, OpenSCManagerW, OpenServiceW, SC_HANDLE, SC_MANAGER_CONNECT,
     SERVICE_AUTO_START, SERVICE_CHANGE_CONFIG, SERVICE_DEMAND_START, SERVICE_ERROR, SERVICE_NO_CHANGE,
@@ -76,8 +76,22 @@ pub struct StartupItem {
 
 // --- Programs and their names ---
 
-/// The program a command starts. A bare name like `rundll32.exe` is looked
-/// for in System32, which is where Windows finds it.
+/// What `GetDriveTypeW` says for a mapped network drive.
+const DRIVE_REMOTE: u32 = 4;
+
+/// A path on one of this PC's own drives. Reading anything else, like
+/// `\\server\share\app.exe` or a mapped network drive, has Windows connect
+/// to that server and sign in to it as the user, and can hang the list
+/// while an unreachable share times out.
+fn is_local(path: &Path) -> bool {
+    let text = path.to_string_lossy();
+    let bytes = text.as_bytes();
+    let drive_path = bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && (bytes[2] == b'\\' || bytes[2] == b'/');
+    drive_path && unsafe { GetDriveTypeW(&HSTRING::from(&text[..3])) } != DRIVE_REMOTE
+}
+
+/// The program a command starts, when it's on this PC. A bare name like
+/// `rundll32.exe` is looked for in System32, which is where Windows finds it.
 fn program_of(command: &str) -> Option<PathBuf> {
     let (exe, _) = split_command(&expand_env(command));
     if exe.is_empty() {
@@ -85,7 +99,7 @@ fn program_of(command: &str) -> Option<PathBuf> {
     }
     let path = PathBuf::from(&exe);
     if path.is_absolute() {
-        return Some(path);
+        return is_local(&path).then_some(path);
     }
     let system = paths::system32(&exe);
     system.exists().then_some(system)
@@ -651,6 +665,9 @@ pub async fn set_startup_item(id: String, enabled: bool) -> CmdResult<()> {
 #[tauri::command]
 pub async fn file_icon(path: String) -> CmdResult<Option<String>> {
     let icon = tauri::async_runtime::spawn_blocking(move || {
+        if !is_local(Path::new(&path)) {
+            return None;
+        }
         crate::programs::icon::extract_png(&path, 0)
             .map(|png| format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(png)))
     })
@@ -679,6 +696,17 @@ mod tests {
         let off = approved_value(false, UNIX_EPOCH + std::time::Duration::from_secs(1));
         assert_eq!(off[0], 3);
         assert_eq!(u64::from_le_bytes(off[4..].try_into().unwrap()), 116_444_736_000_000_000 + 10_000_000);
+    }
+
+    #[test]
+    fn never_reaches_out_to_network_paths() {
+        assert!(!is_local(Path::new(r"\\attacker\share\app.exe")));
+        assert!(!is_local(Path::new("//attacker/share/app.exe")));
+        assert!(!is_local(Path::new(r"\\?\UNC\attacker\share\app.exe")));
+        assert!(!is_local(Path::new(r"\\.\pipe\x")));
+        assert!(!is_local(Path::new("relative.exe")));
+        assert!(is_local(&paths::system32("notepad.exe")));
+        assert_eq!(program_of(r#""\\attacker\share\app.exe" /start"#), None);
     }
 
     #[test]
