@@ -353,8 +353,11 @@ fn find_targets(ids: &[String]) -> Vec<&'static Target> {
     TARGETS.iter().filter(|t| ids.iter().any(|id| id == t.id)).collect()
 }
 
+/// Checks how much each target would free. Windows' slow cleanup scans
+/// reuse a recent answer unless `fresh` is set.
 #[tauri::command]
-pub async fn analyze_cleanup(ids: Vec<String>, on_report: Channel<TargetReport>) -> CmdResult<Vec<TargetReport>> {
+pub async fn analyze_cleanup(ids: Vec<String>, fresh: Option<bool>, on_report: Channel<TargetReport>) -> CmdResult<Vec<TargetReport>> {
+    let fresh = fresh.unwrap_or(false);
     let reports = tauri::async_runtime::spawn_blocking(move || {
         let elevated = is_elevated();
         let running = running_processes();
@@ -363,7 +366,7 @@ pub async fn analyze_cleanup(ids: Vec<String>, on_report: Channel<TargetReport>)
             targets
                 .par_iter()
                 .map(|t| {
-                    let report = analyze_target(t, elevated, &running);
+                    let report = analyze_target(t, elevated, fresh, &running);
                     // Stream each result so the list fills in while slow targets finish.
                     let _ = on_report.send(report.clone());
                     report
@@ -375,7 +378,7 @@ pub async fn analyze_cleanup(ids: Vec<String>, on_report: Channel<TargetReport>)
     Ok(reports)
 }
 
-fn analyze_target(t: &Target, elevated: bool, running: &HashSet<String>) -> TargetReport {
+fn analyze_target(t: &Target, elevated: bool, fresh: bool, running: &HashSet<String>) -> TargetReport {
     let mut report = TargetReport::new(t, elevated);
     report.running = t.processes.iter().any(|p| running.contains(&p.to_lowercase()));
     match t.kind {
@@ -389,9 +392,31 @@ fn analyze_target(t: &Target, elevated: bool, running: &HashSet<String>) -> Targ
             let stats = recycle_bin_stats();
             (report.bytes, report.files, report.found) = (stats.bytes, stats.files, true);
         }
-        Kind::PreviousWindows => previous_windows::analyze(&mut report, elevated),
+        Kind::PreviousWindows => previous_windows::analyze(&mut report, elevated, fresh),
+        Kind::UpdateCleanup => {
+            // The component store is always there. Only an administrator
+            // can ask Windows how much of it can go.
+            report.found = true;
+            if elevated {
+                match handlers::measure(handlers::UPDATE_CLEANUP, true, fresh) {
+                    Ok(bytes) => report.bytes = bytes,
+                    Err(e) => report.note = Some(format!("{e:#}")),
+                }
+            }
+            if servicing_restart_pending() {
+                report.note = Some("Windows has updates waiting for a restart. Restart the PC first, or this may free little.".into());
+            }
+        }
     }
     report
+}
+
+/// Windows Update has installed something that needs a restart to finish.
+/// Until then the component store can't be cleaned up fully.
+fn servicing_restart_pending() -> bool {
+    winreg::RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE)
+        .open_subkey(r"SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending")
+        .is_ok()
 }
 
 #[tauri::command]
@@ -436,6 +461,7 @@ fn clean_target(t: &Target, elevated: bool, on_step: &Channel<CleanStep>) -> Cle
             report.deleted_files = before.files.saturating_sub(after.files);
             report.failed_files = after.files;
         }
+        Kind::UpdateCleanup => run_handler(t, elevated, on_step, &mut report),
         Kind::PreviousWindows => {
             run_handler(t, elevated, on_step, &mut report);
             if report.error.is_none() && !previous_windows::folders().is_empty() {

@@ -8,7 +8,7 @@
 use std::ffi::c_void;
 use std::sync::Mutex;
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, anyhow, bail};
 use windows::Win32::Foundation::S_FALSE;
@@ -25,7 +25,11 @@ use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ, KEY_WRITE};
 const VOLUME_CACHES: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches";
 
 /// How long a scan may take before Reclaim stops waiting for it.
-const SCAN_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+const SCAN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
+/// How long a scan's answer is reused. Windows Update's scan takes a minute
+/// of disk and CPU, and what it finds rarely changes between visits.
+const FRESH_FOR: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Handler {
@@ -38,23 +42,47 @@ pub struct Handler {
 /// "Previous Windows installation(s)": Windows.old.
 pub const PREVIOUS_INSTALLATIONS: Handler = Handler { key: "Previous Installations", dll: "setupcln.dll" };
 
+/// "Windows Update Cleanup": superseded components in the component store
+/// (WinSxS), removed the way `DISM /Online /Cleanup-Image
+/// /StartComponentCleanup` does.
+pub const UPDATE_CLEANUP: Handler = Handler { key: "Update Cleanup", dll: "scavengeui.dll" };
+
 /// Handlers run one at a time. Two at once could have Windows' servicing
 /// stack check and clean up the same files together, and a scan that timed
 /// out may still be running when a cleanup starts.
 static BUSY: Mutex<()> = Mutex::new(());
 
-/// How much the handler can free on the system drive.
-pub fn measure(handler: Handler, elevated: bool) -> anyhow::Result<u64> {
-    on_com_thread(Some(SCAN_TIMEOUT), move || {
+/// Recent scan results, by handler key.
+static MEASURED: Mutex<Vec<(&'static str, Instant, u64)>> = Mutex::new(Vec::new());
+
+fn forget(handler: Handler) {
+    MEASURED.lock().unwrap_or_else(|e| e.into_inner()).retain(|(key, ..)| *key != handler.key);
+}
+
+/// How much the handler can free on the system drive. A recent answer is
+/// reused unless `fresh` asks for a new scan.
+pub fn measure(handler: Handler, elevated: bool, fresh: bool) -> anyhow::Result<u64> {
+    if fresh {
+        forget(handler);
+    } else if let Some(&(.., bytes)) =
+        MEASURED.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(key, at, _)| *key == handler.key && at.elapsed() < FRESH_FOR)
+    {
+        return Ok(bytes);
+    }
+    let bytes = on_com_thread(Some(SCAN_TIMEOUT), move || {
         let _busy = BUSY.lock().unwrap_or_else(|e| e.into_inner());
         let session = Session::open(handler, elevated)?;
         if session.empty { Ok(0) } else { session.space_used() }
-    })
+    })?;
+    forget(handler);
+    MEASURED.lock().unwrap_or_else(|e| e.into_inner()).push((handler.key, Instant::now(), bytes));
+    Ok(bytes)
 }
 
 /// Has the handler free everything it found. `progress` gets the bytes
 /// freed so far and the total, as often as the handler reports them.
 pub fn purge(handler: Handler, elevated: bool, progress: impl Fn(u64, u64) + Send + 'static) -> anyhow::Result<()> {
+    forget(handler);
     on_com_thread(None, move || {
         let _busy = BUSY.lock().unwrap_or_else(|e| e.into_inner());
         let session = Session::open(handler, elevated)?;
@@ -225,8 +253,8 @@ mod tests {
     fn scans_this_pc() {
         let elevated = crate::system::is_elevated();
         let temp_setup = Handler { key: "Temporary Setup Files", dll: "setupcln.dll" };
-        for handler in [PREVIOUS_INSTALLATIONS, temp_setup] {
-            println!("{} (elevated {elevated}): {:?}", handler.key, measure(handler, elevated));
+        for handler in [PREVIOUS_INSTALLATIONS, UPDATE_CLEANUP, temp_setup] {
+            println!("{} (elevated {elevated}): {:?}", handler.key, measure(handler, elevated, true));
         }
     }
 }

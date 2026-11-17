@@ -25,7 +25,7 @@ pub fn folders() -> Vec<PathBuf> {
         .collect()
 }
 
-pub fn analyze(report: &mut TargetReport, elevated: bool) {
+pub fn analyze(report: &mut TargetReport, elevated: bool, fresh: bool) {
     let folders = folders();
     if folders.is_empty() {
         return;
@@ -33,7 +33,7 @@ pub fn analyze(report: &mut TargetReport, elevated: bool) {
     report.found = true;
     report.reveal = folders.first().map(|f| f.to_string_lossy().to_string());
     if elevated {
-        match handlers::measure(handlers::PREVIOUS_INSTALLATIONS, true) {
+        match handlers::measure(handlers::PREVIOUS_INSTALLATIONS, true, fresh) {
             Ok(bytes) => report.bytes = bytes,
             Err(e) => report.note = Some(format!("{e:#}")),
         }

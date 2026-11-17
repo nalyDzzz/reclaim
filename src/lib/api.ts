@@ -319,10 +319,11 @@ export const api = {
     invoke<number>("delete_scan_item", { id, permanent }),
 
   cleanupTargets: () => invoke<CleanupTarget[]>("cleanup_targets"),
-  analyzeCleanup: (ids: string[], onReport: (r: TargetReport) => void) => {
+  /** `fresh` repeats Windows' slow cleanup scans instead of reusing a recent answer. */
+  analyzeCleanup: (ids: string[], onReport: (r: TargetReport) => void, fresh = false) => {
     const channel = new Channel<TargetReport>();
     channel.onmessage = onReport;
-    return invoke<TargetReport[]>("analyze_cleanup", { ids, onReport: channel });
+    return invoke<TargetReport[]>("analyze_cleanup", { ids, fresh, onReport: channel });
   },
   runCleanup: (ids: string[], onStep: (s: CleanStep) => void) => {
     const channel = new Channel<CleanStep>();

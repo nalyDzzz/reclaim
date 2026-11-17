@@ -12,6 +12,8 @@ pub enum Kind {
     RecycleBin,
     /// Windows.old, removed by Windows' own Disk Cleanup handler.
     PreviousWindows,
+    /// Replaced Windows Update components, removed by Windows' own handler.
+    UpdateCleanup,
 }
 
 impl Kind {
@@ -19,6 +21,7 @@ impl Kind {
     pub fn handler(self) -> Option<Handler> {
         match self {
             Kind::PreviousWindows => Some(handlers::PREVIOUS_INSTALLATIONS),
+            Kind::UpdateCleanup => Some(handlers::UPDATE_CLEANUP),
             _ => None,
         }
     }
@@ -128,6 +131,21 @@ pub const TARGETS: &[Target] = &[
         kind: Kind::PreviousWindows,
         gives_up: Some(
             "You can't go back to your previous version of Windows from Settings anymore. Anything still in Windows.old is deleted with it.",
+        ),
+    },
+    Target {
+        id: "component-store",
+        name: "Windows Update cleanup",
+        category: "large",
+        description: "Older versions of Windows files that updates replaced, kept in the component store (WinSxS). Windows' own cleanup removes them, the same as Disk Cleanup and DISM's StartComponentCleanup. It can take 10 minutes or more, and some of it may only go after a restart.",
+        patterns: &[],
+        requires_admin: true,
+        default_selected: false,
+        min_age_hours: 0,
+        processes: &[],
+        kind: Kind::UpdateCleanup,
+        gives_up: Some(
+            "You can't uninstall an update to go back to the version it replaced. Windows removes these on its own about 30 days after an update anyway.",
         ),
     },
     // System

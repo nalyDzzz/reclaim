@@ -37,13 +37,14 @@ export function CleanupView() {
   const [confirming, setConfirming] = useState(false);
 
   const analyze = useCallback(
-    async (list: CleanupTarget[]) => {
+    async (list: CleanupTarget[], fresh = false) => {
       setAnalyzing(true);
       try {
         setReports({});
         const found = await api.analyzeCleanup(
           list.map((t) => t.id),
           (r) => setReports((all) => ({ ...all, [r.id]: r })),
+          fresh,
         );
         setReports(Object.fromEntries(found.map((r) => [r.id, r])));
       } catch (e) {
@@ -73,6 +74,9 @@ export function CleanupView() {
   const chosenBytes = chosen.reduce((s, t) => s + reports[t.id].bytes, 0);
   const foundBytes = visibleTargets.reduce((s, t) => s + (reports[t.id]?.blocked ? 0 : (reports[t.id]?.bytes ?? 0)), 0);
   const activeTarget = active && targets.find((t) => t.id === active.id);
+  // Windows' own cleanups scan for a minute after everything else is in.
+  const waitingOnWindows =
+    analyzing && targets.some((t) => !reports[t.id]) && targets.every((t) => reports[t.id] || t.category === "large");
 
   const clean = async () => {
     setConfirming(false);
@@ -129,7 +133,7 @@ export function CleanupView() {
         title="Cleanup"
         meta="Temporary files and caches that apps and Windows rebuild on their own, and bigger cleanups you choose yourself."
         actions={
-          <IconButton label="Check again" onClick={() => analyze(targets)} disabled={analyzing || cleaning}>
+          <IconButton label="Check again" onClick={() => analyze(targets, true)} disabled={analyzing || cleaning}>
             <RefreshCw className={cx("size-4", analyzing && "animate-spin")} />
           </IconButton>
         }
@@ -144,8 +148,10 @@ export function CleanupView() {
           <div className="mt-1.5 truncate text-[12.5px] text-ink-3">
             {cleaning && activeTarget
               ? `Cleaning ${activeTarget.name}${active?.progress != null ? `, ${Math.round(active.progress * 100)}%` : ""}…`
-              : analyzing
-                ? "Checking caches and temp folders…"
+              : waitingOnWindows
+                ? "Asking Windows how much its own cleanups would free. This can take a minute…"
+                : analyzing
+                  ? "Checking caches and temp folders…"
                 : `${formatBytes(foundBytes)} found across ${plural(visibleTargets.length, "location")}`}
           </div>
         </div>
