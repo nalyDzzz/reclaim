@@ -20,6 +20,9 @@ interface DebloatState {
   settleApp: (name: string) => void;
   needsExplorerRestart: boolean;
   setNeedsExplorerRestart: (needed: boolean) => void;
+  /** A change Windows only reads at sign-in is waiting. */
+  needsSignIn: boolean;
+  setNeedsSignIn: (needed: boolean) => void;
 }
 
 const DebloatContext = createContext<DebloatState | null>(null);
@@ -37,6 +40,7 @@ export function DebloatProvider({ children }: { children: ReactNode }) {
   const [revision, setRevision] = useState(0);
   const [redoing, setRedoing] = useState(false);
   const [needsExplorerRestart, setNeedsExplorerRestart] = useState(false);
+  const [needsSignIn, setNeedsSignIn] = useState(false);
   const toastRef = useRef(toast);
   toastRef.current = toast;
 
@@ -73,6 +77,7 @@ export function DebloatProvider({ children }: { children: ReactNode }) {
       try {
         await api.setTweak(t.id, true);
         if (t.restartExplorer) setNeedsExplorerRestart(true);
+        if (t.signOut) setNeedsSignIn(true);
       } catch (e) {
         failed.push(`${t.name}: ${errorMessage(e)}`);
       }
@@ -133,8 +138,10 @@ export function DebloatProvider({ children }: { children: ReactNode }) {
       settleApp,
       needsExplorerRestart,
       setNeedsExplorerRestart,
+      needsSignIn,
+      setNeedsSignIn,
     }),
-    [drift, driftCount, revision, redoing, redo, keepAsIs, settleTweak, settleApp, needsExplorerRestart],
+    [drift, driftCount, revision, redoing, redo, keepAsIs, settleTweak, settleApp, needsExplorerRestart, needsSignIn],
   );
   return <DebloatContext.Provider value={value}>{children}</DebloatContext.Provider>;
 }

@@ -225,11 +225,13 @@ export interface Tweak {
   id: string;
   name: string;
   description: string;
-  category: "privacy" | "start" | "explorer";
+  category: "privacy" | "start" | "taskbar" | "explorer" | "gaming" | "system";
   applied: boolean;
   requiresAdmin: boolean;
   blocked: boolean;
   restartExplorer: boolean;
+  /** Windows only reads it when the user signs in. */
+  signOut: boolean;
 }
 
 export const api = {
