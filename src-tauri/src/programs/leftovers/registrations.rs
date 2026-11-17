@@ -10,6 +10,7 @@ use std::time::Duration;
 use anyhow::Context;
 use windows::Win32::Foundation::{
     ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, ERROR_SERVICE_DOES_NOT_EXIST, ERROR_SERVICE_MARKED_FOR_DELETE,
+    VARIANT_FALSE,
 };
 use windows::Win32::Storage::FileSystem::DELETE;
 use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx};
@@ -17,7 +18,10 @@ use windows::Win32::System::Services::{
     CloseServiceHandle, ControlService, DeleteService, OpenSCManagerW, OpenServiceW, QueryServiceStatus, SC_HANDLE, SC_MANAGER_CONNECT,
     SERVICE_CONTROL_STOP, SERVICE_DRIVER, SERVICE_QUERY_STATUS, SERVICE_STATUS, SERVICE_STOP, SERVICE_STOPPED, SERVICE_WIN32,
 };
-use windows::Win32::System::TaskScheduler::{IExecAction, IRegisteredTask, ITaskService, TASK_ENUM_HIDDEN, TaskScheduler};
+use windows::Win32::System::TaskScheduler::{
+    IExecAction, IRegisteredTask, ITaskService, TASK_ACTION_EXEC, TASK_CREATE_OR_UPDATE, TASK_ENUM_HIDDEN, TASK_LOGON_INTERACTIVE_TOKEN,
+    TASK_RUNLEVEL_LUA, TaskScheduler,
+};
 use windows::Win32::System::Variant::VARIANT;
 use windows::core::{BSTR, HSTRING, Interface, PCWSTR};
 use winreg::RegKey;
@@ -285,6 +289,43 @@ fn remove_task(path: &str) -> anyhow::Result<()> {
         }
         result => result,
     }
+}
+
+/// Starts `program` as the signed-in user at their normal level, even from
+/// an elevated Reclaim, through a one-off scheduled task: Task Scheduler
+/// runs it in the user's own session with their unelevated token.
+pub(super) fn start_unelevated(program: &Path) -> anyhow::Result<()> {
+    const NAME: &str = "Reclaim one-off launch";
+    unsafe {
+        let service = task_service()?;
+        let task = service.NewTask(0)?;
+        let principal = task.Principal()?;
+        principal.SetLogonType(TASK_LOGON_INTERACTIVE_TOKEN)?;
+        principal.SetRunLevel(TASK_RUNLEVEL_LUA)?;
+        let settings = task.Settings()?;
+        settings.SetDisallowStartIfOnBatteries(VARIANT_FALSE)?;
+        settings.SetStopIfGoingOnBatteries(VARIANT_FALSE)?;
+        // Otherwise Task Scheduler stops what it started after three days.
+        settings.SetExecutionTimeLimit(&BSTR::from("PT0S"))?;
+        let action: IExecAction = task.Actions()?.Create(TASK_ACTION_EXEC)?.cast()?;
+        action.SetPath(&BSTR::from(program.to_string_lossy().as_ref()))?;
+        let folder = service.GetFolder(&BSTR::from("\\"))?;
+        let none = VARIANT::default();
+        let registered = folder.RegisterTaskDefinition(
+            &BSTR::from(NAME),
+            &task,
+            TASK_CREATE_OR_UPDATE.0,
+            &none,
+            &none,
+            TASK_LOGON_INTERACTIVE_TOKEN,
+            &none,
+        )?;
+        let ran = registered.Run(&none);
+        // Deleting the task leaves the program it started running.
+        let _ = folder.DeleteTask(&BSTR::from(NAME), 0);
+        ran?;
+    }
+    Ok(())
 }
 
 // --- Firewall rules ---

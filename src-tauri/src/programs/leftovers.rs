@@ -11,6 +11,8 @@ mod in_use;
 mod registrations;
 mod shortcuts;
 
+pub use in_use::restart_shell;
+
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 

@@ -4,15 +4,19 @@
 //! keeps its folder from being removed until Explorer lets go of it.
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
-use windows::Win32::Foundation::{CloseHandle, ERROR_MORE_DATA, ERROR_SUCCESS};
+use windows::Win32::Foundation::{CloseHandle, ERROR_MORE_DATA, ERROR_SUCCESS, FILETIME};
 use windows::Win32::System::RestartManager::{
-    CCH_RM_SESSION_KEY, RM_PROCESS_INFO, RmEndSession, RmExplorer, RmForceShutdown, RmGetList, RmRegisterResources, RmRestart, RmShutdown,
-    RmStartSession,
+    CCH_RM_SESSION_KEY, RM_PROCESS_INFO, RM_UNIQUE_PROCESS, RmEndSession, RmExplorer, RmForceShutdown, RmGetList, RmRegisterResources,
+    RmRestart, RmShutdown, RmStartSession,
 };
-use windows::Win32::System::Threading::{OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW};
-use windows::core::{HSTRING, PCWSTR, PWSTR};
+use windows::Win32::System::Threading::{
+    GetProcessTimes, OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+};
+use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, GetShellWindow, GetWindowThreadProcessId};
+use windows::core::{HSTRING, PCWSTR, PWSTR, w};
 
 use crate::paths::{known, normalize};
 
@@ -66,13 +70,15 @@ fn files_under(path: &Path) -> Vec<PathBuf> {
 struct Session(u32);
 
 impl Session {
-    fn over(paths: &[PathBuf]) -> Option<Self> {
+    fn start() -> Option<Self> {
         let mut handle = 0;
         let mut key = [0u16; CCH_RM_SESSION_KEY as usize + 1];
-        if unsafe { RmStartSession(&mut handle, None, PWSTR(key.as_mut_ptr())) } != ERROR_SUCCESS {
-            return None;
-        }
-        let session = Session(handle);
+        (unsafe { RmStartSession(&mut handle, None, PWSTR(key.as_mut_ptr())) } == ERROR_SUCCESS).then_some(Session(handle))
+    }
+
+    fn over(paths: &[PathBuf]) -> Option<Self> {
+        let session = Self::start()?;
+        let handle = session.0;
         let files: Vec<HSTRING> = paths.iter().flat_map(|p| files_under(p)).map(|f| HSTRING::from(f.as_os_str())).collect();
         for chunk in files.chunks(500) {
             let names: Vec<PCWSTR> = chunk.iter().map(|f| PCWSTR(f.as_ptr())).collect();
@@ -81,6 +87,24 @@ impl Session {
             }
         }
         Some(session)
+    }
+
+    /// A session over one running program, told apart from a later one
+    /// that reuses its process ID by when it started.
+    fn over_process(pid: u32) -> Option<Self> {
+        let mut started = FILETIME::default();
+        unsafe {
+            let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+            let (mut exited, mut kernel, mut user) = (FILETIME::default(), FILETIME::default(), FILETIME::default());
+            let found = GetProcessTimes(process, &mut started, &mut exited, &mut kernel, &mut user).is_ok();
+            let _ = CloseHandle(process);
+            if !found {
+                return None;
+            }
+        }
+        let session = Self::start()?;
+        let program = RM_UNIQUE_PROCESS { dwProcessId: pid, ProcessStartTime: started };
+        (unsafe { RmRegisterResources(session.0, None, Some(&[program]), None) } == ERROR_SUCCESS).then_some(session)
     }
 
     fn processes(&self) -> Vec<RM_PROCESS_INFO> {
@@ -164,6 +188,54 @@ pub fn release_from_shell(paths: &[PathBuf]) -> anyhow::Result<()> {
             restarted.0
         );
     }
+    Ok(())
+}
+
+/// The File Explorer process that runs the desktop and taskbar.
+fn shell_pid() -> Option<u32> {
+    unsafe {
+        let mut window = GetShellWindow();
+        if window.is_invalid() {
+            window = FindWindowW(w!("Shell_TrayWnd"), PCWSTR::null()).ok()?;
+        }
+        let mut pid = 0;
+        GetWindowThreadProcessId(window, Some(&mut pid));
+        (pid != 0).then_some(pid)
+    }
+}
+
+fn wait_for_taskbar(limit: Duration) -> bool {
+    let start = Instant::now();
+    loop {
+        if unsafe { FindWindowW(w!("Shell_TrayWnd"), PCWSTR::null()) }.is_ok_and(|w| !w.is_invalid()) {
+            return true;
+        }
+        if start.elapsed() > limit {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
+/// Restarts File Explorer the way installers do: Restart Manager closes it
+/// cleanly and starts it again as the signed-in user. From an elevated
+/// Reclaim, running `explorer.exe` directly would start the taskbar, and
+/// everything opened from it, as administrator.
+pub fn restart_shell() -> anyhow::Result<()> {
+    let pid = shell_pid().context("File Explorer isn't running")?;
+    let session = Session::over_process(pid).context("Couldn't ask Windows to restart File Explorer")?;
+    let closed = unsafe { RmShutdown(session.0, RmForceShutdown.0 as u32, None) };
+    // Restart even after a partial shutdown, so the taskbar comes back.
+    let _ = unsafe { RmRestart(session.0, None, None) };
+    drop(session);
+    let mut back = wait_for_taskbar(Duration::from_secs(10));
+    if !back {
+        // Restart Manager closed it without starting it again.
+        super::registrations::start_unelevated(&known().windows.join("explorer.exe"))?;
+        back = wait_for_taskbar(Duration::from_secs(10));
+    }
+    crate::error::ensure!(back, "File Explorer didn't come back. Press Ctrl+Shift+Esc, choose Run new task, and enter explorer.");
+    crate::error::ensure!(closed == ERROR_SUCCESS, "Windows couldn't close File Explorer (error {}).", closed.0);
     Ok(())
 }
 

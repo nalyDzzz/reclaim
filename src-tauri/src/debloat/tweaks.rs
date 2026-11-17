@@ -323,6 +323,9 @@ pub fn set_tweak(id: String, enabled: bool) -> CmdResult<()> {
 #[tauri::command]
 pub async fn restart_explorer() -> CmdResult<()> {
     tauri::async_runtime::spawn_blocking(|| -> anyhow::Result<()> {
+        if is_elevated() {
+            return crate::programs::leftovers::restart_shell();
+        }
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         Command::new("taskkill.exe").args(["/f", "/im", "explorer.exe"]).creation_flags(CREATE_NO_WINDOW).status()?;
         std::thread::sleep(std::time::Duration::from_millis(600));
