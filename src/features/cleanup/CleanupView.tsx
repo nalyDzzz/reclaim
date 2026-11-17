@@ -73,6 +73,7 @@ export function CleanupView() {
   const visibleTargets = targets.filter((t) => !analyzed || reports[t.id]?.found);
   const chosen = visibleTargets.filter((t) => selected.has(t.id) && isCleanable(t.id));
   const chosenBytes = chosen.reduce((s, t) => s + reports[t.id].bytes, 0);
+  const chosenUpTo = chosen.some((t) => reports[t.id].upTo);
   const foundBytes = visibleTargets.reduce((s, t) => s + (reports[t.id]?.blocked ? 0 : (reports[t.id]?.bytes ?? 0)), 0);
   const activeTarget = active && targets.find((t) => t.id === active.id);
   // Windows' own cleanups scan for a minute after everything else is in.
@@ -155,6 +156,7 @@ export function CleanupView() {
       <div className="mx-7 mb-4 flex items-center gap-6 rounded-xl border border-line bg-white/[0.02] px-5 py-4">
         <div className="min-w-0 flex-1">
           <div className="flex items-baseline gap-2">
+            {chosenUpTo && <span className="text-[15px] text-ink-2">Up to</span>}
             <span className="display text-[34px] leading-none text-ink tabular-nums">{value}</span>
             <span className="text-[15px] text-ink-2">{unit} selected</span>
           </div>
@@ -242,14 +244,15 @@ export function CleanupView() {
                 Cancel
               </Button>
               <Button variant="primary" onClick={clean} data-autofocus>
-                Clean {formatBytes(chosenBytes)}
+                Clean {chosenUpTo && "up to "}
+                {formatBytes(chosenBytes)}
               </Button>
             </>
           }
         >
           <p className="mb-3">
             {chosenTradeOffs.length > 0
-              ? "Nothing here can be brought back afterward. Files that are in use are skipped."
+              ? "Read what each one gives up first. Deleted files can't be brought back, and files that are in use are skipped."
               : "These files are deleted permanently. Files that are in use are skipped."}
           </p>
           <ul className="flex flex-col divide-y divide-line rounded-lg border border-line">
@@ -257,7 +260,10 @@ export function CleanupView() {
               <li key={t.id} className="px-3 py-2">
                 <div className="flex items-center justify-between gap-3">
                   <span className="text-ink">{t.name}</span>
-                  <span className="num text-[12.5px] text-ink-2">{formatBytes(reports[t.id].bytes)}</span>
+                  <span className="num text-[12.5px] text-ink-2">
+                    {reports[t.id].upTo && <span className="mr-1 font-sans text-ink-3">up to</span>}
+                    {formatBytes(reports[t.id].bytes)}
+                  </span>
                 </div>
                 {t.givesUp && <TradeOff text={t.givesUp} />}
                 {t.givesUp && reports[t.id].note && <Note text={reports[t.id].note!} />}
@@ -404,7 +410,10 @@ function TargetRow({
           <span className="text-[12px] text-ink-3">—</span>
         ) : report ? (
           <>
-            <span className={cx("num text-[13px]", blocked ? "text-ink-3" : "text-ink")}>{formatBytes(report.bytes)}</span>
+            <span className={cx("num text-[13px]", blocked ? "text-ink-3" : "text-ink")}>
+              {report.upTo && <span className="mr-1 font-sans text-[11.5px] text-ink-3">up to</span>}
+              {formatBytes(report.bytes)}
+            </span>
             {report.files > 0 && <span className="num text-[11px] text-ink-3">{plural(report.files, "file")}</span>}
           </>
         ) : null}

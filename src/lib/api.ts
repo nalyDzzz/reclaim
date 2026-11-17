@@ -174,6 +174,8 @@ export interface TargetReport {
   reveal: string | null;
   /** Label for putting back what an earlier cleanup turned off, via `undoCleanup`. */
   undo: string | null;
+  /** `bytes` is the most cleaning could free, not what it will. */
+  upTo: boolean;
 }
 
 export interface CleanReport {

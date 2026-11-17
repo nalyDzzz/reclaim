@@ -16,6 +16,8 @@ pub enum Kind {
     UpdateCleanup,
     /// hiberfil.sys, freed by turning hibernation off.
     Hibernation,
+    /// System Restore points older than the newest.
+    RestorePoints,
 }
 
 impl Kind {
@@ -163,6 +165,21 @@ pub const TARGETS: &[Target] = &[
         kind: Kind::Hibernation,
         gives_up: Some(
             "You can't hibernate the PC, and Fast Startup turns off with it, so starting up from Shut down takes a little longer. You can turn hibernation back on here.",
+        ),
+    },
+    Target {
+        id: "restore-points",
+        name: "Older restore points",
+        category: "large",
+        description: "System Restore points, and the space they use for old copies of what has changed since each was made. Every one but the newest is removed.",
+        patterns: &[],
+        requires_admin: true,
+        default_selected: false,
+        min_age_hours: 0,
+        processes: &[],
+        kind: Kind::RestorePoints,
+        gives_up: Some(
+            "You can only restore the PC to its newest restore point. Older ones are gone for good, and so are the older file versions File Explorer shows under Previous Versions.",
         ),
     },
     // System

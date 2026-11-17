@@ -3,6 +3,7 @@
 mod handlers;
 mod hibernation;
 mod previous_windows;
+mod restore_points;
 mod targets;
 
 use std::collections::HashSet;
@@ -77,6 +78,8 @@ pub struct TargetReport {
     /// Says how to put back what an earlier cleanup turned off, when
     /// `undo_cleanup` can.
     undo: Option<&'static str>,
+    /// `bytes` is the most cleaning could free, not what it will.
+    up_to: bool,
 }
 
 impl TargetReport {
@@ -91,6 +94,7 @@ impl TargetReport {
             note: None,
             reveal: None,
             undo: None,
+            up_to: false,
         }
     }
 }
@@ -399,6 +403,7 @@ fn analyze_target(t: &Target, elevated: bool, fresh: bool, running: &HashSet<Str
         }
         Kind::PreviousWindows => previous_windows::analyze(&mut report, elevated, fresh),
         Kind::Hibernation => hibernation::analyze(&mut report),
+        Kind::RestorePoints => restore_points::analyze(&mut report, elevated),
         Kind::UpdateCleanup => {
             // The component store is always there. Only an administrator
             // can ask Windows how much of it can go.
@@ -468,6 +473,7 @@ fn clean_target(t: &Target, elevated: bool, on_step: &Channel<CleanStep>) -> Cle
             report.failed_files = after.files;
         }
         Kind::UpdateCleanup => run_handler(t, elevated, on_step, &mut report),
+        Kind::RestorePoints => restore_points::clean(&mut report),
         Kind::Hibernation => {
             let before = hibernation::file_size().unwrap_or(0);
             match hibernation::set(false) {
