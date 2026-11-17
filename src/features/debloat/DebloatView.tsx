@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Lock, PackageX, RotateCcw, Store } from "lucide-react";
+import { History, Lock, PackageX, RotateCcw, ShieldHalf, Store } from "lucide-react";
 import { api, errorMessage, type AppxApp, type Tweak } from "../../lib/api";
 import { plural } from "../../lib/format";
 import { useApp } from "../../state/app";
+import { useDebloat } from "../../state/debloat";
 import { Dialog } from "../../components/Dialog";
 import { Badge, Button, cx, EmptyState, PageHeader, SearchField, Spinner, Switch, Tabs } from "../../components/ui";
 
@@ -26,7 +27,83 @@ export function DebloatView() {
           />
         }
       />
+      <DriftBanner />
+      <ExplorerRestartBanner />
       {section === "apps" ? <PreinstalledApps /> : <WindowsSettings />}
+    </div>
+  );
+}
+
+/** Changes Windows undid since the user made them, with a way to redo them. */
+function DriftBanner() {
+  const { drift, driftCount, redo, redoing, keepAsIs } = useDebloat();
+  if (!drift || driftCount === 0) return null;
+  const blocked = drift.tweaks.filter((t) => t.blocked).length;
+  return (
+    <div className="mx-7 mb-4 flex items-start gap-3 rounded-lg border border-warn/35 bg-warn/8 px-4 py-3">
+      <History className="mt-0.5 size-4 shrink-0 text-warn" />
+      <div className="min-w-0 flex-1">
+        <div className="text-[13px] font-medium text-ink">Some of your changes came undone</div>
+        <div className="mt-0.5 text-[12.5px] text-ink-2">
+          Windows updates often put back settings and apps. Redo your changes, or keep things as they are now.
+        </div>
+        <dl className="mt-2 grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-[12.5px]">
+          {drift.tweaks.length > 0 && (
+            <>
+              <dt className="text-ink-3">Settings reset</dt>
+              <dd className="text-ink">
+                {drift.tweaks.map((t) => t.name).join(", ")}
+                {blocked > 0 && (
+                  <span className="ml-2 inline-flex align-middle">
+                    <Badge tone="warn" icon={<Lock />}>
+                      {blocked === drift.tweaks.length ? "Needs administrator" : `${blocked} ${blocked === 1 ? "needs" : "need"} administrator`}
+                    </Badge>
+                  </span>
+                )}
+              </dd>
+            </>
+          )}
+          {drift.apps.length > 0 && (
+            <>
+              <dt className="text-ink-3">Apps back</dt>
+              <dd className="text-ink">{drift.apps.map((a) => a.displayName).join(", ")}</dd>
+            </>
+          )}
+        </dl>
+      </div>
+      <div className="flex shrink-0 items-center gap-2">
+        <Button size="sm" variant="ghost" disabled={redoing} onClick={keepAsIs}>
+          Keep as is
+        </Button>
+        <Button size="sm" variant="primary" busy={redoing} onClick={redo}>
+          Redo {plural(driftCount, "change")}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function ExplorerRestartBanner() {
+  const { toast } = useApp();
+  const { needsExplorerRestart, setNeedsExplorerRestart } = useDebloat();
+  const [restarting, setRestarting] = useState(false);
+  if (!needsExplorerRestart) return null;
+  return (
+    <div className="mx-7 mb-4 flex items-center gap-3 rounded-lg border border-uv-500/40 bg-uv-600/10 px-4 py-3">
+      <RotateCcw className="size-4 shrink-0 text-uv-300" />
+      <span className="flex-1 text-[13px] text-ink">Some changes apply after File Explorer restarts. Open Explorer windows will close.</span>
+      <Button
+        size="sm"
+        busy={restarting}
+        onClick={async () => {
+          setRestarting(true);
+          await api.restartExplorer().catch((e) => toast("Couldn't restart File Explorer", { detail: errorMessage(e), tone: "danger" }));
+          setRestarting(false);
+          setNeedsExplorerRestart(false);
+        }}
+      >
+        Restart File Explorer
+      </Button>
     </div>
   );
 }
@@ -61,8 +138,14 @@ function AppLogo({ location, name }: { location: string | null; name: string }) 
   );
 }
 
+function relaunchAsAdmin(toast: ReturnType<typeof useApp>["toast"]) {
+  api.relaunchAsAdmin().catch((e) => toast("Reclaim is still running without admin rights", { detail: errorMessage(e), tone: "warn" }));
+}
+
 function PreinstalledApps() {
-  const { toast } = useApp();
+  const { toast, system } = useApp();
+  const { revision, settleApp } = useDebloat();
+  const elevated = system?.elevated ?? false;
   const [apps, setApps] = useState<AppxApp[] | null>(null);
   const [query, setQuery] = useState("");
   const [removing, setRemoving] = useState<Set<string>>(new Set());
@@ -78,7 +161,7 @@ function PreinstalledApps() {
       });
   }, [toast]);
 
-  useEffect(load, [load]);
+  useEffect(load, [load, revision]);
 
   const remove = async (list: AppxApp[]) => {
     setBulk(null);
@@ -86,9 +169,15 @@ function PreinstalledApps() {
     let removed = 0;
     for (const app of list) {
       try {
-        await api.removeAppx(app.packageFullName);
+        await api.removeAppx(app.name, app.installed ? app.packageFullName : null);
         removed++;
-        setApps((all) => all?.filter((a) => a.packageFullName !== app.packageFullName) ?? null);
+        settleApp(app.name);
+        // Without administrator rights Windows' copy stays, so the app moves to that section.
+        const copyStays = !elevated && app.installed && app.provisioned && !app.keepsCopy;
+        setApps(
+          (all) =>
+            all?.flatMap((a) => (a.packageFullName !== app.packageFullName ? [a] : copyStays ? [{ ...a, installed: false }] : [])) ?? null,
+        );
       } catch (e) {
         toast(`Couldn't remove ${app.displayName}`, { detail: errorMessage(e), tone: "danger" });
       } finally {
@@ -102,13 +191,15 @@ function PreinstalledApps() {
     if (removed > 0) toast(`Removed ${plural(removed, "app")}`, { tone: "good" });
   };
 
-  const visible = useMemo(() => {
+  const matches = useMemo(() => {
     const q = query.trim().toLowerCase();
-    return (apps ?? []).filter(
-      (a) => !q || a.displayName.toLowerCase().includes(q) || a.name.toLowerCase().includes(q) || a.publisher.toLowerCase().includes(q),
-    );
-  }, [apps, query]);
-  const recommended = (apps ?? []).filter((a) => a.recommended);
+    return (a: AppxApp) => !q || a.displayName.toLowerCase().includes(q) || a.name.toLowerCase().includes(q) || a.publisher.toLowerCase().includes(q);
+  }, [query]);
+  const installed = useMemo(() => (apps ?? []).filter((a) => a.installed), [apps]);
+  const copies = useMemo(() => (apps ?? []).filter((a) => !a.installed), [apps]);
+  const visibleInstalled = installed.filter(matches);
+  const visibleCopies = copies.filter(matches);
+  const recommended = installed.filter((a) => a.recommended);
 
   if (!apps) {
     return (
@@ -123,7 +214,7 @@ function PreinstalledApps() {
     <>
       <div className="flex items-center gap-3 px-7 pb-3">
         <SearchField value={query} onChange={setQuery} placeholder="Search Store apps" className="w-72" />
-        <span className="flex-1 text-[12.5px] text-ink-3">{plural(apps.length, "removable app")}</span>
+        <span className="flex-1 text-[12.5px] text-ink-3">{plural(installed.length, "removable app")}</span>
         {recommended.length > 0 && (
           <Button variant="primary" icon={<PackageX className="size-3.5" />} onClick={() => setBulk(recommended)}>
             Remove {plural(recommended.length, "common bloat app")}
@@ -131,29 +222,42 @@ function PreinstalledApps() {
         )}
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto border-t border-line">
-        {visible.length === 0 ? (
+        {visibleInstalled.length === 0 && visibleCopies.length === 0 ? (
           <EmptyState icon={<Store />} title={query ? `No apps match “${query}”` : "No removable Store apps"} />
         ) : (
-          visible.map((a) => (
-            <div key={a.packageFullName} className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-4 border-b border-line/60 px-7 py-2.5 hover:bg-white/3">
-              <div className="flex min-w-0 items-center gap-3">
-                <AppLogo location={a.installLocation} name={a.displayName} />
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2">
-                    <span className="truncate text-[13.5px] text-ink">{a.displayName}</span>
-                    {a.recommended && <Badge tone="uv">Commonly removed</Badge>}
-                  </div>
-                  <div className="truncate text-[12px] text-ink-3">
-                    {a.note ?? (GUID.test(a.publisher) ? "Microsoft Store app" : a.publisher)}
-                    <span className="num ml-2 text-ink-3/70">{a.name}</span>
-                  </div>
-                </div>
+          visibleInstalled.map((a) => <AppRow key={a.packageFullName} app={a} busy={removing.has(a.packageFullName)} onRemove={() => remove([a])} />)
+        )}
+
+        {visibleCopies.length > 0 && (
+          <section aria-label="Copies Windows keeps">
+            <div className="flex items-start gap-4 border-b border-line/60 bg-white/2 px-7 pt-5 pb-3">
+              <div className="min-w-0 flex-1">
+                <h2 className="text-[12px] font-semibold tracking-[0.1em] text-ink-3 uppercase">Removed for you, but Windows keeps a copy</h2>
+                <p className="mt-1 max-w-2xl text-[12.5px] text-ink-2">
+                  Windows sets these up for every new account and can put them back during a feature update. Removing the copy keeps them
+                  gone.
+                </p>
               </div>
-              <Button size="sm" busy={removing.has(a.packageFullName)} onClick={() => remove([a])}>
-                Remove
-              </Button>
+              {elevated ? (
+                <Button size="sm" icon={<PackageX className="size-3.5" />} onClick={() => setBulk(copies)}>
+                  Remove {plural(copies.length, "copy", "copies")}
+                </Button>
+              ) : (
+                <Button size="sm" icon={<ShieldHalf className="size-3.5 text-warn" />} onClick={() => relaunchAsAdmin(toast)}>
+                  Restart as administrator
+                </Button>
+              )}
             </div>
-          ))
+            {visibleCopies.map((a) => (
+              <AppRow
+                key={a.packageFullName}
+                app={a}
+                busy={removing.has(a.packageFullName)}
+                blocked={!elevated}
+                onRemove={() => remove([a])}
+              />
+            ))}
+          </section>
         )}
       </div>
 
@@ -173,7 +277,12 @@ function PreinstalledApps() {
           }
         >
           <p className="mb-3">
-            These are removed for your account. You can reinstall any of them from the Microsoft Store.
+            {bulk.every((a) => !a.installed)
+              ? "Windows' copies of these are removed, so they won't come back for new accounts or after updates."
+              : elevated
+                ? "These are removed for your account, along with the copies Windows keeps, so they won't come back for new accounts or after updates."
+                : "These are removed for your account. Windows keeps a copy of most and can put them back after a big update. To remove those too, restart Reclaim as administrator."}{" "}
+            You can reinstall any of them from the Microsoft Store.
           </p>
           <ul className="flex flex-wrap gap-1.5">
             {bulk.map((a) => (
@@ -188,6 +297,29 @@ function PreinstalledApps() {
   );
 }
 
+function AppRow({ app: a, busy, blocked, onRemove }: { app: AppxApp; busy: boolean; blocked?: boolean; onRemove: () => void }) {
+  return (
+    <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-4 border-b border-line/60 px-7 py-2.5 hover:bg-white/3">
+      <div className="flex min-w-0 items-center gap-3">
+        <AppLogo location={a.installLocation} name={a.displayName} />
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <span className="truncate text-[13.5px] text-ink">{a.displayName}</span>
+            {a.recommended && <Badge tone="uv">Commonly removed</Badge>}
+          </div>
+          <div className="truncate text-[12px] text-ink-3">
+            {a.note ?? (GUID.test(a.publisher) || !a.publisher ? "Microsoft Store app" : a.publisher)}
+            <span className="num ml-2 text-ink-3/70">{a.name}</span>
+          </div>
+        </div>
+      </div>
+      <Button size="sm" busy={busy} disabled={blocked} onClick={onRemove} title={blocked ? "Needs administrator rights" : undefined}>
+        {a.installed ? "Remove" : "Remove copy"}
+      </Button>
+    </div>
+  );
+}
+
 const TWEAK_GROUPS: { id: Tweak["category"]; label: string }[] = [
   { id: "privacy", label: "Privacy" },
   { id: "start", label: "Start, search, and lock screen" },
@@ -196,20 +328,23 @@ const TWEAK_GROUPS: { id: Tweak["category"]; label: string }[] = [
 
 function WindowsSettings() {
   const { toast } = useApp();
+  const { revision, settleTweak, setNeedsExplorerRestart } = useDebloat();
   const [tweaks, setTweaks] = useState<Tweak[] | null>(null);
   const [pending, setPending] = useState<Set<string>>(new Set());
-  const [needsExplorerRestart, setNeedsExplorerRestart] = useState(false);
-  const [restarting, setRestarting] = useState(false);
 
   useEffect(() => {
-    api.listTweaks().then(setTweaks).catch(() => setTweaks([]));
-  }, []);
+    api
+      .listTweaks()
+      .then(setTweaks)
+      .catch(() => setTweaks([]));
+  }, [revision]);
 
   const toggle = async (t: Tweak, on: boolean) => {
     setPending((s) => new Set(s).add(t.id));
     try {
       await api.setTweak(t.id, on);
       setTweaks((list) => list?.map((x) => (x.id === t.id ? { ...x, applied: on } : x)) ?? null);
+      settleTweak(t.id);
       if (t.restartExplorer) setNeedsExplorerRestart(true);
     } catch (e) {
       toast(`Couldn't change “${t.name}”`, { detail: errorMessage(e), tone: "danger" });
@@ -232,24 +367,6 @@ function WindowsSettings() {
 
   return (
     <div className="min-h-0 flex-1 overflow-y-auto px-7 pb-8">
-      {needsExplorerRestart && (
-        <div className="mb-4 flex items-center gap-3 rounded-lg border border-uv-500/40 bg-uv-600/10 px-4 py-3">
-          <RotateCcw className="size-4 shrink-0 text-uv-300" />
-          <span className="flex-1 text-[13px] text-ink">Some changes apply after File Explorer restarts. Open Explorer windows will close.</span>
-          <Button
-            size="sm"
-            busy={restarting}
-            onClick={async () => {
-              setRestarting(true);
-              await api.restartExplorer().catch((e) => toast("Couldn't restart File Explorer", { detail: errorMessage(e), tone: "danger" }));
-              setRestarting(false);
-              setNeedsExplorerRestart(false);
-            }}
-          >
-            Restart File Explorer
-          </Button>
-        </div>
-      )}
       {TWEAK_GROUPS.map((g) => (
         <section key={g.id} className="mb-5">
           <h2 className="mb-1 px-3 py-1.5 text-[12px] font-semibold tracking-[0.1em] text-ink-3 uppercase">{g.label}</h2>
@@ -279,7 +396,10 @@ function WindowsSettings() {
           </ul>
         </section>
       ))}
-      <p className="px-3 text-[12px] text-ink-3">Each switch only changes its own setting. Turning it off restores the Windows default.</p>
+      <p className="px-3 text-[12px] text-ink-3">
+        Each switch only changes its own setting. Turning it off restores the Windows default. Reclaim checks on each start whether Windows
+        has undone any of them.
+      </p>
     </div>
   );
 }

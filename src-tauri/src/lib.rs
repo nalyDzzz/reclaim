@@ -5,6 +5,7 @@ mod launch;
 mod paths;
 mod pool;
 mod programs;
+mod remembered;
 mod storage;
 mod system;
 
@@ -27,6 +28,9 @@ pub fn run() {
         .manage(programs::icon::IconCache::default())
         .manage(launch::PendingScan::from_command_line())
         .setup(|app| {
+            if let Ok(dir) = app.path().app_local_data_dir() {
+                remembered::init(&dir);
+            }
             if system::is_elevated() {
                 launch::admit_unelevated_launches(app.handle());
             }
@@ -69,6 +73,8 @@ pub fn run() {
             debloat::tweaks::list_tweaks,
             debloat::tweaks::set_tweak,
             debloat::tweaks::restart_explorer,
+            debloat::drift::check_drift,
+            debloat::drift::forget_drift,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Reclaim");

@@ -9,6 +9,7 @@ import { DebloatView } from "./features/debloat/DebloatView";
 import { StorageView, type ScanRequest } from "./features/storage/StorageView";
 import { api } from "./lib/api";
 import { AppProvider } from "./state/app";
+import { DebloatProvider } from "./state/debloat";
 import { UpdatesProvider } from "./state/updates";
 
 export default function App() {
@@ -50,24 +51,26 @@ export default function App() {
   return (
     <AppProvider>
       <UpdatesProvider>
-        <div className="flex h-full flex-col">
-          <TitleBar />
-          <div className="flex min-h-0 flex-1">
-            <Sidebar page={page} onNavigate={navigate} />
-            <main className="relative min-w-0 flex-1 overflow-hidden rounded-tl-[var(--radius-panel)] border-t border-l border-line bg-panel [html.mica_&]:bg-panel/88">
-              {(Object.keys(views) as Page[]).map((p) => {
-                if (!visited.has(p)) return null;
-                return (
-                  <div key={p} className="absolute inset-0 flex flex-col" hidden={p !== page}>
-                    {views[p]}
-                  </div>
-                );
-              })}
-            </main>
+        <DebloatProvider>
+          <div className="flex h-full flex-col">
+            <TitleBar />
+            <div className="flex min-h-0 flex-1">
+              <Sidebar page={page} onNavigate={navigate} />
+              <main className="relative min-w-0 flex-1 overflow-hidden rounded-tl-[var(--radius-panel)] border-t border-l border-line bg-panel [html.mica_&]:bg-panel/88">
+                {(Object.keys(views) as Page[]).map((p) => {
+                  if (!visited.has(p)) return null;
+                  return (
+                    <div key={p} className="absolute inset-0 flex flex-col" hidden={p !== page}>
+                      {views[p]}
+                    </div>
+                  );
+                })}
+              </main>
+            </div>
           </div>
-        </div>
-        <UpdateDialog />
-        <Toasts />
+          <UpdateDialog />
+          <Toasts />
+        </DebloatProvider>
       </UpdatesProvider>
     </AppProvider>
   );

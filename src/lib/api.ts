@@ -185,6 +185,20 @@ export interface AppxApp {
   known: boolean;
   recommended: boolean;
   note: string | null;
+  /** Installed for the signed-in user. When false, only Windows' copy for new accounts is left. */
+  installed: boolean;
+  /** Windows keeps a copy it sets up for new accounts and can put back after a feature update. */
+  provisioned: boolean;
+  /** Other apps rely on it, so Reclaim leaves Windows' copy alone. */
+  keepsCopy: boolean;
+}
+
+/** Debloat changes that came undone, usually after a Windows update. */
+export interface Drift {
+  /** Settings the user turned on that are off again. */
+  tweaks: Tweak[];
+  /** Removed Store apps that are installed again. */
+  apps: AppxApp[];
 }
 
 export interface Tweak {
@@ -248,11 +262,15 @@ export const api = {
   runCleanup: (ids: string[]) => invoke<CleanReport[]>("run_cleanup", { ids }),
 
   listAppx: () => invoke<AppxApp[]>("list_appx"),
-  removeAppx: (packageFullName: string) => invoke<void>("remove_appx", { packageFullName }),
+  /** Removes the app for this user and, as administrator, Windows' copy too. Pass no full name for a copy-only app. */
+  removeAppx: (name: string, packageFullName: string | null) => invoke<void>("remove_appx", { name, packageFullName }),
   appxLogo: (installLocation: string) => invoke<string | null>("appx_logo", { installLocation }),
   listTweaks: () => invoke<Tweak[]>("list_tweaks"),
   setTweak: (id: string, enabled: boolean) => invoke<void>("set_tweak", { id, enabled }),
   restartExplorer: () => invoke<void>("restart_explorer"),
+  checkDrift: () => invoke<Drift>("check_drift"),
+  /** Stops watching these, keeping things as they are now. */
+  forgetDrift: (tweaks: string[], apps: string[]) => invoke<void>("forget_drift", { tweaks, apps }),
 };
 
 /** Commands reject with the Rust error message as a plain string. */

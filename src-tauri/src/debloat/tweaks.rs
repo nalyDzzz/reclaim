@@ -10,6 +10,7 @@ use winreg::RegKey;
 use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_64KEY};
 
 use crate::error::CmdResult;
+use crate::remembered::{self, Remembered};
 use crate::system::is_elevated;
 
 #[derive(Clone, Copy)]
@@ -225,6 +226,14 @@ const TWEAKS: &[Tweak] = &[
     },
 ];
 
+/// Explorer view options people also flip from Explorer's own menus. When
+/// one of these changes back, it was most likely the user, not Windows.
+const NOT_WATCHED: &[&str] = &["file-extensions", "hidden-files"];
+
+fn watched(tweak: &Tweak) -> bool {
+    !NOT_WATCHED.contains(&tweak.id)
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TweakState {
@@ -282,41 +291,79 @@ fn revert(write: &Write) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn is_tweak_applied(tweak: &Tweak) -> bool {
+    tweak.writes.iter().all(is_applied)
+}
+
+fn state(tweak: &Tweak, elevated: bool) -> TweakState {
+    let requires_admin = tweak.writes.iter().any(|w| matches!(w.hive, Hive::Machine));
+    TweakState {
+        id: tweak.id,
+        name: tweak.name,
+        description: tweak.description,
+        category: tweak.category,
+        applied: is_tweak_applied(tweak),
+        requires_admin,
+        blocked: requires_admin && !elevated,
+        restart_explorer: tweak.restart_explorer,
+    }
+}
+
 #[tauri::command]
 pub fn list_tweaks() -> Vec<TweakState> {
     let elevated = is_elevated();
-    TWEAKS
-        .iter()
-        .map(|t| {
-            let requires_admin = t.writes.iter().any(|w| matches!(w.hive, Hive::Machine));
-            TweakState {
-                id: t.id,
-                name: t.name,
-                description: t.description,
-                category: t.category,
-                applied: t.writes.iter().all(is_applied),
-                requires_admin,
-                blocked: requires_admin && !elevated,
-                restart_explorer: t.restart_explorer,
-            }
-        })
-        .collect()
+    TWEAKS.iter().map(|t| state(t, elevated)).collect()
+}
+
+fn was_denied(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<std::io::Error>().is_some_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied)
+}
+
+pub fn change(id: &str, enabled: bool) -> anyhow::Result<()> {
+    let tweak = TWEAKS.iter().find(|t| t.id == id).context("Unknown tweak")?;
+    for write in tweak.writes {
+        let result = if enabled { apply(write) } else { revert(write) };
+        result.map_err(|e| match write.hive {
+            Hive::Machine => anyhow::anyhow!("Needs administrator rights. Restart Reclaim as administrator to change this. ({e})"),
+            // Windows guards a few of its own settings against apps changing them.
+            Hive::User if was_denied(&e) => anyhow::anyhow!("Windows blocked this change. It protects some settings from apps. ({e})"),
+            Hive::User => e,
+        })?;
+    }
+    // A policy or Windows' own protection can quietly put a value back.
+    crate::error::ensure!(!enabled || is_tweak_applied(tweak), "Windows didn't keep this change. A policy on this PC may be setting it.");
+    let _ = remembered::update(|r| {
+        if enabled && watched(tweak) {
+            r.tweaks.insert(tweak.id.to_string());
+        } else {
+            r.tweaks.remove(tweak.id);
+        }
+    });
+    Ok(())
 }
 
 #[tauri::command]
 pub fn set_tweak(id: String, enabled: bool) -> CmdResult<()> {
-    let tweak = TWEAKS.iter().find(|t| t.id == id).context("Unknown tweak")?;
-    for write in tweak.writes {
-        let result = if enabled { apply(write) } else { revert(write) };
-        result.map_err(|e| {
-            if matches!(write.hive, Hive::Machine) {
-                anyhow::anyhow!("Needs administrator rights. Restart Reclaim as administrator to change this. ({e})")
-            } else {
-                e
-            }
-        })?;
-    }
+    change(&id, enabled)?;
     Ok(())
+}
+
+/// Adds the watched tweaks that are already on, the first time Reclaim
+/// keeps a record, so changes made with an older version count too.
+pub fn seed(record: &mut Remembered) {
+    if record.seeded {
+        return;
+    }
+    record.seeded = true;
+    for tweak in TWEAKS.iter().filter(|t| watched(t) && is_tweak_applied(t)) {
+        record.tweaks.insert(tweak.id.to_string());
+    }
+}
+
+/// Tweaks the user turned on that are off again.
+pub fn drifted(record: &Remembered) -> Vec<TweakState> {
+    let elevated = is_elevated();
+    TWEAKS.iter().filter(|t| record.tweaks.contains(t.id) && watched(t) && !is_tweak_applied(t)).map(|t| state(t, elevated)).collect()
 }
 
 /// Restarts File Explorer so Explorer and taskbar tweaks take effect.
@@ -339,6 +386,13 @@ pub async fn restart_explorer() -> CmdResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unwatched_tweaks_exist() {
+        for id in NOT_WATCHED {
+            assert!(TWEAKS.iter().any(|t| t.id == *id), "{id} isn't a tweak");
+        }
+    }
 
     #[test]
     fn tweak_ids_are_unique() {

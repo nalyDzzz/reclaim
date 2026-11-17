@@ -23,7 +23,7 @@ export function Toasts() {
           <span className="mt-px shrink-0 [&_svg]:size-4">{ICONS[t.tone]}</span>
           <div className="min-w-0 flex-1">
             <div className="text-[13px] font-medium text-ink">{t.message}</div>
-            {t.detail && <div className="mt-0.5 text-[12.5px] break-words text-ink-2">{t.detail}</div>}
+            {t.detail && <div className="mt-0.5 text-[12.5px] break-words whitespace-pre-line text-ink-2">{t.detail}</div>}
           </div>
           <button aria-label="Dismiss" onClick={() => dismissToast(t.id)} className="text-ink-3 hover:text-ink">
             <X className="size-3.5" />

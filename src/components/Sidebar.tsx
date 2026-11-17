@@ -2,6 +2,7 @@ import { HardDrive, Package, ShieldCheck, ShieldHalf, SlidersHorizontal, Sparkle
 import { api, errorMessage } from "../lib/api";
 import { formatBytes } from "../lib/format";
 import { useApp } from "../state/app";
+import { useDebloat } from "../state/debloat";
 import { useUpdates } from "../state/updates";
 import { cx, Meter, Spinner } from "./ui";
 
@@ -16,6 +17,7 @@ const NAV: { page: Page; label: string; icon: React.ReactNode }[] = [
 
 export function Sidebar({ page, onNavigate }: { page: Page; onNavigate: (p: Page) => void }) {
   const { drives, system, toast } = useApp();
+  const { driftCount } = useDebloat();
   const fixed = drives.filter((d) => d.kind === "fixed" && d.totalBytes > 0);
 
   return (
@@ -36,6 +38,14 @@ export function Sidebar({ page, onNavigate }: { page: Page; onNavigate: (p: Page
                 {active && <span className="absolute top-2.5 bottom-2.5 left-0 w-[3px] rounded-full bg-uv-400" />}
                 <span className={active ? "text-uv-300" : undefined}>{item.icon}</span>
                 {item.label}
+                {item.page === "debloat" && driftCount > 0 && (
+                  <span
+                    className="num ml-auto flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-warn/18 px-1.5 text-[11px] font-semibold text-warn"
+                    title={`${driftCount} of your changes came undone`}
+                  >
+                    {driftCount}
+                  </span>
+                )}
               </button>
             </li>
           );
