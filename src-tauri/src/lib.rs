@@ -6,6 +6,7 @@ mod paths;
 mod pool;
 mod programs;
 mod remembered;
+mod startup;
 mod storage;
 mod system;
 
@@ -75,6 +76,9 @@ pub fn run() {
             debloat::tweaks::restart_explorer,
             debloat::drift::check_drift,
             debloat::drift::forget_drift,
+            startup::list_startup,
+            startup::set_startup_item,
+            startup::file_icon,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Reclaim");

@@ -20,6 +20,8 @@ Installed copies keep themselves up to date from 0.2.0 on: when a new version is
 
 **Cleanup.** Temp folders, Windows Update downloads, Delivery Optimization, error reports, crash dumps, browser caches (Chrome, Edge, Brave, Vivaldi, Opera, Firefox), app caches (Discord, Slack, VS Code, Cursor, Spotify, Steam), and developer caches (npm, pnpm, Yarn, Bun, pip/uv, Cargo, NuGet, Gradle, Maven, Go). It warns when an app is open and holding its cache.
 
+**Startup.** Everything that starts with Windows in one list: the apps Task Manager shows, plus the scheduled tasks that run at sign-in or boot and the services your installed apps start automatically, which it doesn't. Apps use Task Manager's own switch, so the two always agree; tasks are disabled; services are set to start manually, so their app can still start them. Entries whose program is gone are flagged. Nothing is deleted.
+
 **Debloat.** Remove preinstalled Store apps, with the commonly removed ones flagged and notes on the ones some people need (Xbox, Phone Link…). Run as administrator, Reclaim also removes the copy Windows keeps for new accounts, so feature updates don't put the app back; apps you removed earlier that Windows still keeps a copy of are listed separately. Plus reversible registry switches for ads, suggestions, Bing in Start, Recall, telemetry, the classic right-click menu, and more. Reclaim remembers what you changed and checks on each start whether Windows undid any of it, with one click to redo it.
 
 ## Safety model
@@ -41,6 +43,7 @@ Installed copies keep themselves up to date from 0.2.0 on: when a new version is
 ```
 src/                    React UI
   features/apps/        installed apps, uninstall + leftover flow
+  features/startup/     what starts with Windows
   features/storage/     drive picker, scan progress, treemap, lists
   features/cleanup/     junk and cache cleanup
   features/debloat/     Store apps and Windows tweaks
@@ -50,6 +53,7 @@ src-tauri/src/
   storage/              parallel scanner and in-memory size tree
   cleaner/              cleanup targets and deletion
   debloat/              AppX packages, registry tweaks, and checks for undone changes
+  startup.rs            Run keys, Startup folders, logon tasks, auto-start services
   remembered.rs         what the user changed, so undone changes can be spotted
   paths.rs              known folders and the protected-path rules
   launch.rs             --scan from Explorer's menu, single-instance handoff

@@ -191,7 +191,7 @@ fn remove_service(name: &str) -> anyhow::Result<()> {
 
 // --- Scheduled tasks ---
 
-fn task_service() -> windows::core::Result<ITaskService> {
+pub(crate) fn task_service() -> windows::core::Result<ITaskService> {
     unsafe {
         // Either apartment works, and the thread may already be in one.
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);

@@ -16,6 +16,8 @@ pub struct Remembered {
     pub tweaks: BTreeSet<String>,
     /// Package names of Store apps the user removed.
     pub removed_apps: BTreeSet<String>,
+    /// Services Reclaim switched from starting automatically to manual.
+    pub manual_services: BTreeSet<String>,
     /// Whether the tweaks that were already on when Reclaim started keeping
     /// this have been added to it.
     pub seeded: bool,

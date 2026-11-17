@@ -201,6 +201,26 @@ export interface Drift {
   apps: AppxApp[];
 }
 
+export interface StartupItem {
+  /** Where the entry is; pass it back to `setStartupItem`. */
+  id: string;
+  name: string;
+  /** The entry's own name: the registry value, file, task, or service. */
+  entry: string;
+  publisher: string | null;
+  command: string;
+  program: string | null;
+  source: "registry" | "folder" | "task" | "service";
+  allUsers: boolean;
+  enabled: boolean;
+  requiresAdmin: boolean;
+  blocked: boolean;
+  /** The program it starts is gone, usually left behind by an uninstall. */
+  missing: boolean;
+  /** A service that waits until shortly after startup. */
+  delayed: boolean;
+}
+
 export interface Tweak {
   id: string;
   name: string;
@@ -271,6 +291,10 @@ export const api = {
   checkDrift: () => invoke<Drift>("check_drift"),
   /** Stops watching these, keeping things as they are now. */
   forgetDrift: (tweaks: string[], apps: string[]) => invoke<void>("forget_drift", { tweaks, apps }),
+
+  listStartup: () => invoke<StartupItem[]>("list_startup"),
+  setStartupItem: (id: string, enabled: boolean) => invoke<void>("set_startup_item", { id, enabled }),
+  fileIcon: (path: string) => invoke<string | null>("file_icon", { path }),
 };
 
 /** Commands reject with the Rust error message as a plain string. */

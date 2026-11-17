@@ -12,6 +12,8 @@ mod registrations;
 mod shortcuts;
 
 pub use in_use::restart_shell;
+pub(crate) use registrations::task_service;
+pub(crate) use shortcuts::target as shortcut_target;
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};

@@ -15,7 +15,7 @@ const MAX_DEPTH: usize = 3;
 
 /// Where a `.lnk` file points, as saved in it. None for other files and for
 /// shortcuts to things that aren't files, like Control Panel pages.
-pub(super) fn target(path: &Path) -> Option<String> {
+pub(crate) fn target(path: &Path) -> Option<String> {
     if !path.extension().is_some_and(|e| e.eq_ignore_ascii_case("lnk")) {
         return None;
     }

@@ -6,6 +6,7 @@ import { UpdateDialog } from "./components/UpdateDialog";
 import { AppsView } from "./features/apps/AppsView";
 import { CleanupView } from "./features/cleanup/CleanupView";
 import { DebloatView } from "./features/debloat/DebloatView";
+import { StartupView } from "./features/startup/StartupView";
 import { StorageView, type ScanRequest } from "./features/storage/StorageView";
 import { api } from "./lib/api";
 import { AppProvider } from "./state/app";
@@ -43,6 +44,7 @@ export default function App() {
 
   const views: Record<Page, React.ReactNode> = {
     apps: <AppsView />,
+    startup: <StartupView />,
     storage: <StorageView request={scanRequest} />,
     cleanup: <CleanupView />,
     debloat: <DebloatView />,

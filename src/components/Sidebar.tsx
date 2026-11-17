@@ -1,4 +1,4 @@
-import { HardDrive, Package, ShieldCheck, ShieldHalf, SlidersHorizontal, Sparkles } from "lucide-react";
+import { HardDrive, Package, Rocket, ShieldCheck, ShieldHalf, SlidersHorizontal, Sparkles } from "lucide-react";
 import { api, errorMessage } from "../lib/api";
 import { formatBytes } from "../lib/format";
 import { useApp } from "../state/app";
@@ -6,10 +6,11 @@ import { useDebloat } from "../state/debloat";
 import { useUpdates } from "../state/updates";
 import { cx, Meter, Spinner } from "./ui";
 
-export type Page = "apps" | "storage" | "cleanup" | "debloat";
+export type Page = "apps" | "startup" | "storage" | "cleanup" | "debloat";
 
 const NAV: { page: Page; label: string; icon: React.ReactNode }[] = [
   { page: "apps", label: "Apps", icon: <Package /> },
+  { page: "startup", label: "Startup", icon: <Rocket /> },
   { page: "storage", label: "Storage", icon: <HardDrive /> },
   { page: "cleanup", label: "Cleanup", icon: <Sparkles /> },
   { page: "debloat", label: "Debloat", icon: <SlidersHorizontal /> },
