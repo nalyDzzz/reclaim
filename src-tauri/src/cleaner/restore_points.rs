@@ -101,7 +101,8 @@ pub fn analyze(report: &mut TargetReport, elevated: bool) {
         ));
         return;
     }
-    let kept = format!("the newest, \"{}\" from {}", newest.description, newest.date);
+    // The closing comma ends the aside, after the date's own comma.
+    let kept = format!("the newest, \"{}\" from {},", newest.description, newest.date);
     // Restore points share their space, so how much goes depends on how
     // much the kept one needs. All of it is the most that can be freed.
     report.bytes = snapshot.used();
